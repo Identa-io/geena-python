@@ -1,0 +1,1411 @@
+# The organization plane's contract (/org/v1). This document is the single source of truth for the
+# plane's routes: the Go registrar and server interface are generated from it (`make oapi`), and
+# cmd/identa binds the generated registrar through the engine's gated OrgRouter — so an operation
+# added here is wired with authentication, the organization's required security level and the
+# `organization` scope by construction, and the published contract cannot drift from the code.
+#
+# Same load-bearing conventions as the partner plane:
+#
+#   - Path ids are documented as UUIDs but generated as Go strings (x-go-type): the handlers map a
+#     malformed id to the same oracle-shaped `404 not_found` as a foreign one, so the generated
+#     wrapper must never intercept it with a 400 of its own.
+#   - Parameter names must stay exactly `requestId` / `slotId`: they become the echo route params
+#     the handlers read.
+openapi: 3.0.3
+info:
+  title: Identa Organization API
+  version: "1.0"
+  description: |
+    The organization plane: an organization's own systems reach what the organization already
+    holds — its connections (the requests people accepted), the copies it kept, the files it holds
+    for a request (kept copies and the files it attached itself), and the update proposals
+    addressed to it — through a member-bound partner token instead of a dashboard session.
+
+    The token is a partner access token whose consent carries the `organization` scope: the
+    person behind it signed in on the hosted ceremony and consented to the app acting under
+    their membership of the app's owning organization. Every call re-checks, live, that the
+    person is still an active member and that their role covers the act (`request_read` for
+    reads, `request_manage` for keeping copies and deciding proposals) — exactly the checks the
+    dashboard runs — and serves only the organization's own material. Reading a kept copy or a
+    proposed version opens the organization's key in the member's key context; a cold key
+    answers `423 org_sealed` until the member's own step-up opens it.
+
+    Ungranted, foreign, malformed and nonexistent all read as the same `404 not_found` — the
+    oracle rule: probing learns nothing.
+
+servers:
+  - url: /org/v1
+
+security:
+  - organizationToken: []
+
+paths:
+  /requests:
+    get:
+      operationId: listRequests
+      summary: List the organization's requests
+      description: |
+        Every request the organization holds — pending invitations it sent and the connections
+        people accepted — newest first. Metadata only, all of it org-authored, so the call is
+        unreceipted. `state` is evaluated at call time on both clocks (invitation window, then
+        the accepted terms' retention window), so a connection past retention reads `expired`.
+      parameters:
+        - name: email
+          in: query
+          required: false
+          description: Only requests addressed to this recipient email (normalized, exact).
+          schema:
+            type: string
+            format: email
+      responses:
+        "200":
+          description: The organization's requests.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/RequestsResponse"
+        default:
+          $ref: "#/components/responses/Error"
+
+  /requests/{requestId}:
+    parameters:
+      - $ref: "#/components/parameters/requestId"
+    get:
+      operationId: getRequest
+      summary: One request, with its items, kept copies and open proposals
+      description: |
+        The request, the manifest version it pinned, and — per slot — whether the person granted
+        it (`granted` / `pending`) plus one `records` entry per standing answer, the adoptions
+        (copies the organization kept, materialized or still pending a cold key) and the open
+        update proposals. One call renders an organization's view of a connection; the copies'
+        values are read separately.
+
+        `records` is where a slot answered by several parties becomes legible: each entry names
+        its `participant`, carries the version that party's source stands at, and says whether it
+        can still be acted on. The slot-level `status` is unchanged and still says only
+        `granted` / `pending` — a slot every one of whose records is unavailable is still
+        `granted`, because the person said yes and has not taken it back.
+      responses:
+        "200":
+          description: The request detail.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/RequestDetailResponse"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        default:
+          $ref: "#/components/responses/Error"
+
+  /requests/{requestId}/copies:
+    parameters:
+      - $ref: "#/components/parameters/requestId"
+    get:
+      operationId: listCopies
+      summary: The values of the copies the organization kept
+      description: |
+        Every materialized adoption of this request with its content — the organization's own
+        copy, opened with the organization's key. Requires `request_manage`. Pending adoptions
+        (waiting for a cold key) are listed on the request detail, not here.
+
+        A kept file is served as its metadata (`label`, `fileName`, `mimeType`, `fileSize`) plus
+        a `downloadUrl` — the plane's own adoption-scoped route below; its bytes are never inline.
+
+        Every copy of one person's record under one request and slot is a version of ONE org
+        document (data-correction), interleaved with the organization's own corrections. Each
+        item's `data` is the copy as kept — the version its adoption pinned — and
+        `currentData` is the head of that chain: the same values unless a newer copy was kept or a
+        member corrected it. A consumer that wants what the organization uses today reads
+        `currentData` of the newest adoption per slot — and, on a slot the manifest asks about a
+        subject, per `participant` within it: two children answering one slot are two parties, two
+        source records and two chains, and collapsing them by slot alone would show one child's
+        data under the other's question.
+
+        A kept FILE chains the same way (request-files): one org file per (request, slot, source
+        file), one version per keep, and the organization never writes into it. So a file item's
+        metadata and `orgVersion`/`origin` are the version ITS adoption kept — not the newest —
+        while `currentOrgVersion`/`currentOrigin` name the head, the newest keep. `currentData` is
+        absent on a file: it has no values, and the bytes of each version are fetched through that
+        adoption's own `downloadUrl`.
+
+        This listing is keyed by ADOPTION — what the organization took, and when. To read the
+        request's files as files, kept copies beside the files the organization attached itself,
+        use `/requests/{requestId}/files`.
+      responses:
+        "200":
+          description: The kept copies with their values.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/CopiesResponse"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "423":
+          $ref: "#/components/responses/OrgSealed"
+        default:
+          $ref: "#/components/responses/Error"
+
+  /requests/{requestId}/copies/{adoptionId}/download:
+    parameters:
+      - $ref: "#/components/parameters/requestId"
+      - $ref: "#/components/parameters/adoptionId"
+    get:
+      operationId: downloadCopy
+      summary: The bytes of a kept file
+      description: |
+        Streams the organization's copy of a kept file, decrypted with the organization's key, as
+        an attachment (`Content-Disposition`, the file's own `Content-Type` and `Content-Length`).
+        Addressed by the adoption — the organization's record of having kept it — never by a raw
+        file id: the plane re-proves that the request is this organization's, that the adoption
+        belongs to it, is materialized and is a file, and that the copy lives in the
+        organization's own vault. Requires `request_manage`, the same floor as reading a copy's
+        values. A document adoption answers `400 unsupported_item`; a copy still pending a cold
+        key answers `403 adoption_refused`.
+
+        It serves the version THIS adoption kept, not the head: after a newer version of the same
+        file is kept, both adoptions keep returning their own bytes (request-files).
+      responses:
+        "200":
+          description: The file's bytes.
+          content:
+            application/octet-stream:
+              schema:
+                type: string
+                format: binary
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "423":
+          $ref: "#/components/responses/OrgSealed"
+        default:
+          $ref: "#/components/responses/Error"
+
+  /requests/{requestId}/files:
+    parameters:
+      - $ref: "#/components/parameters/requestId"
+    get:
+      operationId: listRequestFiles
+      summary: The files the organization holds for this request
+      description: |
+        Every file this organization holds for the request, in one listing and one row per FILE —
+        the head of its versions: the copies it kept of the person's files (`origin: kept`) and the
+        files it attached itself (`origin: added`). Requires `request_manage`.
+
+        Nothing is decrypted here — a file's readable part is its metadata — and each row's
+        `downloadUrl` is the plane's own version-pinned route for its bytes. A kept row names the
+        keep that produced that version (`adoptionId`) and the person's version it was taken at; an
+        added row names neither, because nothing of the person's was taken.
+      responses:
+        "200":
+          description: The request's files, one row per file.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/RequestFilesResponse"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        default:
+          $ref: "#/components/responses/Error"
+    post:
+      operationId: attachRequestFile
+      summary: Attach one of the organization's own files to this request
+      description: |
+        The organization's OWN file — a signed agreement, a letter, a scan of its own — stored in
+        the organization's vault, tagged as the organization's own and naming this request. The
+        person never sees it, and no adoption row, receipt or proposal is written, because nothing
+        of theirs was taken. Requires `request_manage` and `file_create`.
+
+        It works on every request the organization holds, in any state, whatever its manifest asks
+        for: a manifest with no file slot at all still accepts attachments — that is the point of
+        the route, not an edge case. `slotId` is optional, and when given it must name a slot of
+        this request's own manifest version; that is the only thing the manifest is consulted for.
+
+        `multipart/form-data`. The bytes are capped (`STORAGE_MAX_UPLOAD_BYTES`; over it answers
+        `413 too_large` and writes nothing) and their type is detected from the content, never
+        taken from the part's declared one. A cold organization key answers `423 org_sealed`.
+      requestBody:
+        required: true
+        content:
+          multipart/form-data:
+            schema:
+              $ref: "#/components/schemas/AttachFileForm"
+      responses:
+        "200":
+          description: The attached file, at version 1.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/RequestFile"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "413":
+          $ref: "#/components/responses/TooLarge"
+        "423":
+          $ref: "#/components/responses/OrgSealed"
+        default:
+          $ref: "#/components/responses/Error"
+
+  /requests/{requestId}/files/{fileId}:
+    parameters:
+      - $ref: "#/components/parameters/requestId"
+      - $ref: "#/components/parameters/fileId"
+    put:
+      operationId: replaceRequestFile
+      summary: Replace the bytes of a file the organization attached
+      description: |
+        The next version of an ADDED file, with its own object and its own key, so anything pinned
+        to the older version keeps reading the bytes it always did. Requires `request_manage` and
+        `file_update`.
+
+        Pinned to what the caller saw: `expectedOrgVersion` is the `orgVersion` it read, and a
+        stale one answers `409 version_conflict` having written nothing. A KEPT file is refused
+        (`403 adoption_refused`) — its versions are the person's versions as kept, and the
+        organization does not write into that history.
+      requestBody:
+        required: true
+        content:
+          multipart/form-data:
+            schema:
+              $ref: "#/components/schemas/ReplaceFileForm"
+      responses:
+        "200":
+          description: The file at its new version.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/RequestFile"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "409":
+          $ref: "#/components/responses/Conflict"
+        "413":
+          $ref: "#/components/responses/TooLarge"
+        "423":
+          $ref: "#/components/responses/OrgSealed"
+        default:
+          $ref: "#/components/responses/Error"
+    patch:
+      operationId: relabelRequestFile
+      summary: Rename a file the organization attached
+      description: |
+        A metadata-only version: the same bytes and the same object under a new label, plus a row
+        saying who renamed it and when. Requires `request_manage` and `file_update`; a kept file is
+        refused for the same reason as on PUT.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/RelabelFileRequest"
+      responses:
+        "200":
+          description: The file at its new version.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/RequestFile"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        default:
+          $ref: "#/components/responses/Error"
+    delete:
+      operationId: removeRequestFile
+      summary: Delete a file the organization attached
+      description: |
+        Every version's row, then every version's bytes — no database link reaches the object
+        store, so this is the only chance to clean it up. Requires `request_manage` and
+        `file_delete`. A kept copy is refused (`403 adoption_refused`): the keep it records is the
+        organization's own account of what it took from the person.
+      responses:
+        "200":
+          description: The file is gone.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/RemovedFileResponse"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        default:
+          $ref: "#/components/responses/Error"
+
+  /requests/{requestId}/files/{fileId}/history:
+    parameters:
+      - $ref: "#/components/parameters/requestId"
+      - $ref: "#/components/parameters/fileId"
+    get:
+      operationId: getRequestFileHistory
+      summary: Every version of one request file
+      description: |
+        Newest first: the keeps of a kept file, each naming its own adoption and the person's
+        version it was taken at, or the replacements and renames of a file the organization
+        attached, each naming the member who wrote it. Same floor as the listing, and each row's
+        `downloadUrl` serves that version's own bytes.
+      responses:
+        "200":
+          description: The file's versions, newest first.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/RequestFilesResponse"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        default:
+          $ref: "#/components/responses/Error"
+
+  /requests/{requestId}/files/{fileId}/download:
+    parameters:
+      - $ref: "#/components/parameters/requestId"
+      - $ref: "#/components/parameters/fileId"
+    get:
+      operationId: downloadRequestFile
+      summary: The bytes of one version of a request file
+      description: |
+        Streams one version of a file this organization holds for this request, decrypted with the
+        organization's key, as an attachment (`Content-Disposition`, the file's own `Content-Type`
+        and `Content-Length`). Requires `request_manage`, the same floor as the listing.
+
+        The route re-proves the whole chain before a byte moves: the request is this
+        organization's, and the file lives in the organization's own vault carrying THIS request —
+        so another request's file under the same organization reads as `404 not_found`, exactly
+        like an unknown id. `version` pins one version; absent means the head, and a version this
+        file does not have is the same 404.
+
+        A kept file is reachable here and through the adoption-scoped
+        `/copies/{adoptionId}/download`, which serves the version that adoption kept; an
+        attachment has no adoption and is served only here.
+      parameters:
+        - name: version
+          in: query
+          required: false
+          description: |
+            The `orgVersion` to serve — a positive integer, as listed. Absent serves the head.
+            Part of the address, so a malformed value and a version the file does not have both
+            answer the oracle `404 not_found`.
+          schema:
+            type: string
+            pattern: "^[1-9][0-9]*$"
+      responses:
+        "200":
+          description: The version's bytes.
+          content:
+            application/octet-stream:
+              schema:
+                type: string
+                format: binary
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "423":
+          $ref: "#/components/responses/OrgSealed"
+        default:
+          $ref: "#/components/responses/Error"
+
+  /requests/{requestId}/slots/{slotId}/adopt:
+    parameters:
+      - $ref: "#/components/parameters/requestId"
+      - $ref: "#/components/parameters/slotId"
+    post:
+      operationId: adoptSlot
+      summary: Keep the current version of a granted slot
+      description: |
+        Materializes a copy of the slot's currently granted resource(s) into the organization's
+        vault — the manual "Keep" on a slot whose adoption policy is manual, or a first copy
+        after the fact. Requires the slot's `keep` verb and `request_manage`. Idempotent per
+        (slot, source version).
+
+        Files are kept like records: the copy is a version of the one org file this (request, slot,
+        source file) already has, tagged with the person's version it was taken at.
+
+        A slot the manifest asks about a SUBJECT can be answered by several parties — two children,
+        two companies. Send `{"participant": "<alias>"}` to keep just that party's records, taking
+        the alias from the slot's own `records`. With no body every standing record of the slot is
+        kept, which is what this route has always done. "No body" means no bytes, however they are
+        framed: a body sent with `Transfer-Encoding: chunked` narrows the keep exactly as a body
+        sent with a `Content-Length` does. An alias that names no granted record of this item —
+        unknown, malformed, or belonging to a party who answers a different item — is one
+        `403 adoption_refused`.
+
+        The keep is PER PARTICIPANT. A record the recipient may no longer answer for does not stop
+        the other parties' records being kept: it comes back in `skipped` with its `reason`, and
+        the call still answers `200`. Read `skipped` on every keep — a `200` whose `adoptions` is
+        shorter than the slot's `records` is not a failure to report, it is this. Only a keep that
+        took NOTHING answers the typed refusal (`403 participant_ineligible` /
+        `403 adoption_refused`). Retrying is safe: a version already kept is returned, never copied
+        twice, so a retry after standing is regained adds only the records that were skipped.
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/AdoptSlotRequest"
+      responses:
+        "200":
+          description: The adoptions produced (or already present).
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/AdoptionsResponse"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "423":
+          $ref: "#/components/responses/OrgSealed"
+        default:
+          $ref: "#/components/responses/Error"
+
+  /requests/{requestId}/slots/{slotId}/correct:
+    parameters:
+      - $ref: "#/components/parameters/requestId"
+      - $ref: "#/components/parameters/slotId"
+    post:
+      operationId: correctRequestCopy
+      summary: Record the organization's own correction of a kept copy
+      description: |
+        The organization's own revision of a copy it keeps — an address in the format the
+        organization wants, a name cased its way — appended as the next version of that copy's
+        chain, tagged `correction`, and held beside what the person gave. It NEVER changes the
+        person's data and never reaches them: data the organization believes WRONG rather than
+        badly shaped is the person's to fix, through the partner plane's `edit` verb.
+
+        It corrects a copy that already exists; it never keeps. Keep the slot first (POST
+        `/adopt`) — correcting a record with no materialized copy answers `403 adoption_refused`.
+        Requires the slot's `keep` verb and `request_manage`. Structured records only: a kept file
+        or a captured scan answers `403 adoption_refused`, since the organization does not write
+        into a file's history.
+
+        Pinned to what the member saw, and refused before anything is written when either pin is
+        stale. Take all three addressing fields from the NEWEST materialized keep of the record on
+        `/copies` (the listing carries one entry per keep — the newest is the one with the highest
+        `adoption.sourceVersion`): `sourceResourceId` and `expectedSourceVersion` from that copy's
+        `adoption`, and `expectedOrgVersion` from its `currentOrgVersion`, which is the head of the
+        chain a correction appends to. The same copy's own `resourceId` is the ORGANIZATION's copy,
+        never the record to name here.
+
+        `data` is the COMPLETE corrected document, never a patch, validated against the copy's own
+        schema — a correction changes the VALUES, never what the record is.
+
+        No adoption row is created, no receipt is written and no consent changes: the new version's
+        origin and author are its record. Re-read `/copies` afterwards to display the corrected
+        head through `currentData`, `currentOrgVersion` and `currentOrigin`.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/CorrectCopyRequest"
+      responses:
+        "200":
+          description: The corrected record — its newest keep, and the version the correction became.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/CopyCorrectionResult"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "409":
+          $ref: "#/components/responses/Conflict"
+        "423":
+          $ref: "#/components/responses/OrgSealed"
+        default:
+          $ref: "#/components/responses/Error"
+
+  /requests/{requestId}/adoptions/drain:
+    parameters:
+      - $ref: "#/components/parameters/requestId"
+    post:
+      operationId: drainAdoptions
+      summary: Retry the request's pending adoptions
+      description: |
+        Re-attempts every adoption that queued as pending because a key was cold at the time.
+        Requires `request_manage`. Reports how many materialized and how many still wait.
+      responses:
+        "200":
+          description: The drain outcome.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/DrainResponse"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        default:
+          $ref: "#/components/responses/Error"
+
+  /requests/{requestId}/proposals:
+    parameters:
+      - $ref: "#/components/parameters/requestId"
+    get:
+      operationId: listProposals
+      summary: The open update proposals on this request
+      description: |
+        "The source of something you hold has a newer version" notices, one per granted resource
+        at most, superseded in place by later edits. Address a decision by the notice's own
+        `proposalId`. A proposal carries no diff — comparing against the copy already kept is the
+        reader's own work.
+
+        The editor is not always the recipient. A notice about a company's record is raised by
+        whoever edited it inside that company — any collaborator with write access — and reaches
+        this request because the recipient may still answer for that company. `participant` names
+        the party; it never names the person who typed.
+
+        Notices are not a complete audit of the source. An edit made while the recipient could not
+        answer for that party (they had lost the Manager role, say) raises none, and regaining the
+        role does not replay it: the live reads — this request's `records` and the serving plane —
+        show the current version, but no notice appears for the edit that was missed.
+      responses:
+        "200":
+          description: The open proposals.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ProposalsResponse"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        default:
+          $ref: "#/components/responses/Error"
+
+  /requests/{requestId}/proposals/{proposalId}/candidate:
+    parameters:
+      - $ref: "#/components/parameters/requestId"
+      - $ref: "#/components/parameters/proposalId"
+    get:
+      operationId: getProposalCandidate
+      summary: The proposed version's values
+      description: |
+        The content of the version the person produced, read from their vault in the member's
+        key context. Looking is taking: this writes a READ receipt on the person's side. Requires
+        `request_manage`.
+      responses:
+        "200":
+          description: The proposed version.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ProposalCandidateResponse"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "423":
+          $ref: "#/components/responses/OrgSealed"
+        default:
+          $ref: "#/components/responses/Error"
+
+  /requests/{requestId}/proposals/{proposalId}/adopt:
+    parameters:
+      - $ref: "#/components/parameters/requestId"
+      - $ref: "#/components/parameters/proposalId"
+    post:
+      operationId: adoptProposal
+      summary: Accept the proposed version
+      description: |
+        Keeps the proposed version as the organization's copy and closes the proposal. A notice is
+        about ONE granted resource, so this keeps one copy — on a slot answered by several
+        resources the other notices are decided on their own. Requires `request_manage`.
+      responses:
+        "200":
+          description: The adoption produced.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Adoption"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "423":
+          $ref: "#/components/responses/OrgSealed"
+        default:
+          $ref: "#/components/responses/Error"
+
+  /requests/{requestId}/proposals/{proposalId}/dismiss:
+    parameters:
+      - $ref: "#/components/parameters/requestId"
+      - $ref: "#/components/parameters/proposalId"
+    post:
+      operationId: dismissProposal
+      summary: Dismiss the proposed version
+      description: |
+        Closes the proposal without keeping the version; the organization's copy stays as it was.
+        A later edit opens a fresh proposal. Requires `request_manage`.
+      responses:
+        "200":
+          description: Whether an open proposal was dismissed.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/DismissResponse"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        default:
+          $ref: "#/components/responses/Error"
+
+components:
+  securitySchemes:
+    organizationToken:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT
+      description: |
+        A partner access token from POST /oauth/token whose consent carries the `organization`
+        scope: `token_use=partner`, the client id, and a user who is an active member of the
+        client's owning organization. First-party tokens and identity-only partner tokens are
+        refused on this plane.
+
+  parameters:
+    requestId:
+      name: requestId
+      in: path
+      required: true
+      description: The request (connection) id.
+      schema:
+        type: string
+        format: uuid
+        x-go-type: string
+    slotId:
+      name: slotId
+      in: path
+      required: true
+      description: The slot's canonical id, as listed on the request detail.
+      schema:
+        type: string
+        format: uuid
+        x-go-type: string
+    proposalId:
+      name: proposalId
+      in: path
+      required: true
+      description: The proposal's id, as listed on `/proposals` and on the request detail.
+      schema:
+        type: string
+        format: uuid
+        x-go-type: string
+    adoptionId:
+      name: adoptionId
+      in: path
+      required: true
+      description: The adoption's id, as listed on the request detail and on `/copies`.
+      schema:
+        type: string
+        format: uuid
+        x-go-type: string
+    fileId:
+      name: fileId
+      in: path
+      required: true
+      description: |
+        The file's id in the organization's vault, as listed on `/files`. Always addressed
+        together with its request: the pair is what the handlers resolve, and a file of another
+        request reads as missing.
+      schema:
+        type: string
+        format: uuid
+        x-go-type: string
+
+  responses:
+    Error:
+      description: |
+        Error. Handler errors carry `{error, message}` with a stable machine-readable code:
+        `partner_token_required`, `unknown_client`, `organization_suspended`, `not_a_member`,
+        `role_insufficient`, `not_found`, `unsupported_item`, `invalid_body`, `invalid_document`,
+        `adoption_refused`, `participant_ineligible`, `version_conflict`, `too_large`,
+        `org_sealed`, `server_error`. Security-gate refusals
+        (missing scope, step-up required) instead answer 403 with the platform's
+        `{"errors":[{"message","extensions"}]}` envelope.
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/Error"
+    BadRequest:
+      description: |
+        The act does not apply to the addressed item (`unsupported_item`), or the body is not the
+        one the route takes — a missing or unreadable `file` part, an `expectedOrgVersion` that is
+        not a positive integer, a JSON body without `label`, a slot-keep body that is not readable
+        JSON, a correction whose two expected versions are not positive integers or whose `data` is
+        not a JSON object (`invalid_body`) — or the corrected values do not satisfy the copy's own
+        schema (`invalid_document`).
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/Error"
+    Conflict:
+      description: |
+        `version_conflict` — what the caller pinned its write to is no longer current. On a file:
+        another member replaced or renamed it, so `expectedOrgVersion` is no longer the head. On a
+        copy correction: the person published a newer version, or another member kept or corrected
+        the copy, so `expectedSourceVersion` or `expectedOrgVersion` is stale. Nothing was written;
+        re-read the listing (`/files`, `/copies`) and re-apply the edit over what comes back —
+        never the same body with freshly fetched version numbers.
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/Error"
+    TooLarge:
+      description: |
+        `too_large` — the upload is over `STORAGE_MAX_UPLOAD_BYTES`. Refused before any object is
+        written, so nothing partial survives.
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/Error"
+    Forbidden:
+      description: The act is refused (`role_insufficient`, `adoption_refused`).
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/Error"
+    NotFound:
+      description: |
+        Foreign, malformed or nonexistent — deliberately indistinguishable (`not_found`; the
+        oracle rule).
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/Error"
+    OrgSealed:
+      description: |
+        `org_sealed` — the organization's key is cold in this member's context: the member is a
+        Level 2/3 account whose own step-up has not run yet. Drive POST /oauth/step-up, then retry.
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/Error"
+
+  schemas:
+    Error:
+      type: object
+      required: [error, message]
+      properties:
+        error:
+          type: string
+          description: Stable machine-readable code.
+        message:
+          type: string
+
+    Request:
+      type: object
+      required: [requestId, manifestId, manifestVersion, recipientEmail, state, initiatedBy, invitationExpiresAt, createdAt]
+      properties:
+        requestId:
+          type: string
+          format: uuid
+        manifestId:
+          type: string
+          format: uuid
+        manifestVersion:
+          type: integer
+          description: The version pinned at consent — re-publishing never widens a live connection.
+        manifestName:
+          type: string
+        recipientEmail:
+          type: string
+          format: email
+        state:
+          type: string
+          description: |
+            `pending`, `active`, `rejected_by_sender`, `rejected_by_recipient`, `expired`,
+            `revoked`, `suspended` — evaluated at call time on both clocks.
+        initiatedBy:
+          type: string
+          description: "`org` (sent by the organization) or `recipient` (opened from an app's hosted ceremony)."
+        initiatingClientId:
+          type: string
+          description: The app that mediated a recipient-initiated request.
+        invitationExpiresAt:
+          type: string
+          format: date-time
+        createdAt:
+          type: string
+          format: date-time
+
+    RequestsResponse:
+      type: object
+      required: [requests]
+      properties:
+        requests:
+          type: array
+          items:
+            $ref: "#/components/schemas/Request"
+
+    RequestItem:
+      type: object
+      required: [slotId, multiple, kind, verbs, status, records]
+      properties:
+        slotId:
+          type: string
+          format: uuid
+        label:
+          type: string
+        group:
+          type: string
+        subject:
+          type: string
+          description: The manifest subject this slot asks about; absent for the recipient's own items.
+        multiple:
+          type: boolean
+        kind:
+          type: string
+          description: "`schema`, `id_document`, `personal_files`, `entity_files`, `custom_schema`."
+        target:
+          type: string
+        verbs:
+          type: array
+          items:
+            type: string
+            description: "`fill`, `edit`, `keep`."
+        adoption:
+          type: string
+          description: "The keep slot's adoption policy: `manual` or `auto`."
+        status:
+          type: string
+          description: |
+            `granted` or `pending`, unchanged: ANY record granted makes the item `granted`, and
+            `pending` stays indistinguishable from "the person has no such data" and from "they
+            never will" (the oracle rule, per slot).
+        records:
+          type: array
+          description: |
+            One entry per standing grant of this item, oldest first; empty on a `pending` item.
+
+            Records describe an answer the person has ALREADY given, which is why they may name a
+            party: an organization that asked about a spouse AND a company has to tell the two
+            answers apart, act on one without touching the other, and see when a party stops being
+            answerable. A party who never shared anything has no grant and therefore never appears
+            — the person's family, and the companies they manage, stay unenumerable.
+          items:
+            $ref: "#/components/schemas/RequestItemRecord"
+
+    ParticipantRef:
+      type: object
+      description: |
+        One party an organization holds data about. `alias` is pairwise: stable across every
+        connection THIS organization has with that party, and unrelated to the handle any other
+        organization holds for them, so two organizations cannot correlate the same child or the
+        same company. A vault id is never published on this plane.
+
+        `type` is the manifest's own vocabulary. (The partner plane says `company` for the same
+        lane, because apps speak to people about companies; this plane speaks to the organization
+        about its own manifest subjects.)
+      required: [subjectId, type, alias]
+      properties:
+        subjectId:
+          type: string
+          description: The manifest subject this party answers.
+        type:
+          type: string
+          enum: [person, legal_entity]
+        alias:
+          type: string
+          format: uuid
+
+    RequestItemRecord:
+      type: object
+      required: [resourceId, status]
+      properties:
+        resourceId:
+          type: string
+          format: uuid
+          description: The person's resource answering this item.
+        participant:
+          allOf:
+            - $ref: "#/components/schemas/ParticipantRef"
+          nullable: true
+          description: |
+            Whose record this is. Always present, `null` for the RECIPIENT's own item — the
+            connection is with them, so there is nobody to name.
+        sourceVersion:
+          type: integer
+          description: |
+            The version the person's resource stands at right now — compare it against the
+            `sourceVersion` of the copy you kept to see whether you hold the current one. Absent on
+            an `unavailable` record (a version of data the recipient may no longer hand over is not
+            yours to learn) and on an identification document, which has no versions.
+        status:
+          type: string
+          enum: [available, unavailable]
+        reason:
+          type: string
+          description: |
+            Why an `unavailable` record is unavailable: `connection_inactive` — the connection
+            itself is no longer active (the person revoked it, or it ran past the retention window
+            of the accepted terms), which makes every record of the request unavailable and is the
+            same state the partner plane refuses with; `participant_ineligible` — the recipient
+            may no longer answer for that party (they left the company, lost the Manager role, or
+            their membership was revoked), the same condition the partner plane renders on a served
+            record; or `source_unavailable` — the resource no longer resolves. Absent on an
+            `available` record.
+
+            None of them deletes anything: the grant still stands, and any copy already kept is
+            untouched. Standing regained makes a `participant_ineligible` record `available` again;
+            an inactive connection stays inactive, and nothing about its records is looked at.
+
+    AdoptSlotRequest:
+      type: object
+      description: The optional body of a slot keep. No body keeps every record of the slot.
+      properties:
+        participant:
+          type: string
+          format: uuid
+          description: |
+            Keep only the records of the party this alias names, as published on the slot's
+            `records`.
+
+    Adoption:
+      type: object
+      required: [adoptionId, itemKind, sourceResourceId, sourceVersion, resourceType, state, adoptedAt]
+      properties:
+        adoptionId:
+          type: string
+          format: uuid
+        slotId:
+          type: string
+          format: uuid
+        itemKind:
+          type: string
+        itemTarget:
+          type: string
+        sourceResourceId:
+          type: string
+          format: uuid
+        sourceVersion:
+          type: integer
+        orgResourceId:
+          type: string
+          format: uuid
+          description: |
+            The org resource the copy is a version of — the chain shared by every copy of this
+            record (or of this file) under this request and slot — once materialized.
+        orgVersion:
+          type: integer
+          description: |
+            Which version of that org resource this keep produced (data-correction, request-files).
+            Absent while pending. Two keeps of the same file are two versions of one org file, so
+            this is what tells them apart and what the copy's `downloadUrl` serves.
+        resourceType:
+          type: string
+          description: "`document`, `id_document` or `file`."
+        state:
+          type: string
+          description: "`materialized` or `pending` (a cold key at adoption time; drain retries it)."
+        adoptedAt:
+          type: string
+          format: date-time
+        materializedAt:
+          type: string
+          format: date-time
+        lastError:
+          type: string
+        participant:
+          allOf:
+            - $ref: "#/components/schemas/ParticipantRef"
+          nullable: true
+          description: |
+            Whose data this copy is, as SNAPSHOTTED at keep time — the one participant binding the
+            system stores rather than derives, precisely so a copy of a child's passport keeps
+            saying "this child" after the grant is superseded, the vault renamed, or the connection
+            revoked. Always present, `null` for the recipient's own item (and on every row kept
+            before the snapshot shipped, which is deliberately not backfilled — the inputs are
+            gone).
+
+    Proposal:
+      type: object
+      required: [proposalId, itemKind, resourceId, newVersion, proposedAt]
+      properties:
+        proposalId:
+          type: string
+          format: uuid
+        slotId:
+          type: string
+          format: uuid
+        itemKind:
+          type: string
+        itemTarget:
+          type: string
+        resourceId:
+          type: string
+          format: uuid
+        newVersion:
+          type: integer
+        proposedAt:
+          type: string
+          format: date-time
+        participant:
+          allOf:
+            - $ref: "#/components/schemas/ParticipantRef"
+          nullable: true
+          description: |
+            Whose newer version this notice is about. Always present, `null` for the recipient's
+            own item. Derived from the notice's live grant rather than snapshotted: a notice
+            cascades with its grant, so there is nothing for it to outlive.
+
+    RequestDetailResponse:
+      type: object
+      required: [request, manifestName, items, adoptions, proposals]
+      properties:
+        request:
+          $ref: "#/components/schemas/Request"
+        manifestName:
+          type: string
+        items:
+          type: array
+          items:
+            $ref: "#/components/schemas/RequestItem"
+        adoptions:
+          type: array
+          items:
+            $ref: "#/components/schemas/Adoption"
+        proposals:
+          type: array
+          items:
+            $ref: "#/components/schemas/Proposal"
+
+    Copy:
+      type: object
+      required: [adoption, resourceId, name, data]
+      properties:
+        adoption:
+          $ref: "#/components/schemas/Adoption"
+        resourceId:
+          type: string
+          format: uuid
+          description: The copy's id in the organization's vault.
+        name:
+          type: string
+        schemaRef:
+          type: string
+          description: The document's schema; absent on kept files and captured scans.
+        data:
+          type: object
+          additionalProperties: true
+          description: |
+            The copy's values as kept — the version this adoption pinned — served exactly as
+            stored; for a kept file, that version's metadata (`label`, `fileName`, `mimeType`,
+            `fileSize`), which is all a file has to read.
+        orgVersion:
+          type: integer
+          description: |
+            The org document — or, for a kept file, the org file — version `data` is
+            (data-correction, request-files).
+        origin:
+          type: string
+          description: "What that version is: `copy` here (a correction is never pinned by an adoption)."
+        currentOrgVersion:
+          type: integer
+          description: |
+            The head of the copy's chain — what the organization uses today. On a kept file, the
+            newest keep of that file; equal to `orgVersion` when this adoption is the newest.
+        currentOrigin:
+          type: string
+          description: |
+            `copy` (a newer kept version, or this one) or `correction` (a member's own revision).
+            Always `copy` on a kept file: the organization does not write into one.
+        currentData:
+          type: object
+          additionalProperties: true
+          description: |
+            The head's values. Equal to `data` when nothing was kept or corrected since. Absent on
+            a kept file, which has no values — fetch a version's bytes through its own adoption's
+            `downloadUrl`.
+        downloadUrl:
+          type: string
+          description: |
+            On a kept file only — the plane's adoption-scoped route for its bytes. It serves the
+            version THIS adoption kept, not the head.
+        participant:
+          allOf:
+            - $ref: "#/components/schemas/ParticipantRef"
+          nullable: true
+          description: |
+            Whose data this copy is — the same snapshot the copy's own `adoption` block carries,
+            repeated at the top level so a consumer can group copies by party without reaching into
+            each adoption. Always present, `null` for the recipient's own item.
+
+    CopiesResponse:
+      type: object
+      required: [copies]
+      properties:
+        copies:
+          type: array
+          items:
+            $ref: "#/components/schemas/Copy"
+
+    CorrectCopyRequest:
+      type: object
+      required: [expectedSourceVersion, expectedOrgVersion, data]
+      description: |
+        One correction, pinned to the two versions the member's editor was opened on.
+      properties:
+        sourceResourceId:
+          type: string
+          format: uuid
+          description: |
+            Which record to correct — the copy's `adoption.sourceResourceId`, the PERSON's record,
+            not the organization's copy of it. Omittable only when the slot holds exactly one
+            granted record; on a `multiple` slot, or one several parties answered, omitting it is
+            refused rather than resolved to the first record. An id naming no granted record of
+            this item — unknown or malformed alike — is one `403 adoption_refused`.
+        expectedSourceVersion:
+          type: integer
+          description: |
+            The person's version the copy being corrected was taken at — the copy's
+            `adoption.sourceVersion`. A newer version published since the editor opened answers
+            `409 version_conflict`, and nothing is kept on the way through.
+        expectedOrgVersion:
+          type: integer
+          description: |
+            The head of the copy's chain as the editor displayed it — the copy's
+            `currentOrgVersion`. Another member's keep or correction since answers
+            `409 version_conflict`.
+        data:
+          type: object
+          additionalProperties: true
+          description: |
+            The complete corrected document, validated against the copy's own schema. Never a
+            patch: any field omitted is gone from the new version.
+
+    CopyCorrectionResult:
+      type: object
+      required: [adoption, orgVersion]
+      properties:
+        adoption:
+          allOf:
+            - $ref: "#/components/schemas/Adoption"
+          description: |
+            The record's newest keep, UNCHANGED by the correction: its `orgVersion` still names the
+            kept snapshot. A correction creates no adoption — it is a version of the copy, not a
+            new taking of the person's data.
+        orgVersion:
+          type: integer
+          description: |
+            The version the correction became — the new head of the copy's chain, and the value
+            `/copies` will report as `currentOrgVersion` with `currentOrigin: correction`. Send it
+            as the next `expectedOrgVersion` to correct again without a re-read.
+
+    RequestFile:
+      type: object
+      description: |
+        One version of one file the organization holds for a request (request-files): a copy it
+        kept of the person's file, or a file it attached itself. Both are rows of the
+        organization's own vault carrying the request they belong to, and the person sees neither
+        — no organization → person direction exists.
+
+        `/files` returns the head of each file, one row per file; `/files/{fileId}/history`
+        returns every version of one file. Same shape for both: a history row IS a row of the same
+        table, and only `orgVersion` and the audit fields differ down a chain.
+      required: [fileId, origin, orgVersion, fileName, fileSize, mimeType, writtenBy, writtenAt, downloadUrl]
+      properties:
+        fileId:
+          type: string
+          format: uuid
+          description: |
+            The file's id in the organization's vault, shared by every version of it: a kept
+            file's versions are its keeps, an attachment's are its replacements and renames.
+        origin:
+          type: string
+          description: |
+            `kept` (a copy of the person's file, taken under this request — every version of such
+            a file is a keep) or `added` (a file the organization attached itself).
+        orgVersion:
+          type: integer
+          description: Which version of that org file this row is.
+        adoptionId:
+          type: string
+          format: uuid
+          description: |
+            The keep that produced this version. Absent on an added file, which copied nothing,
+            and on a kept version whose adoption row the read could not resolve.
+        sourceVersion:
+          type: integer
+          description: The person's file version this version was kept at; absent on an added file.
+        slotId:
+          type: string
+          format: uuid
+          description: |
+            The manifest slot the file answers, when it answers one. Absent on an attachment filed
+            against the request rather than an ask — the normal case, since a request whose
+            manifest never asked for files still accepts them.
+        label:
+          type: string
+          description: The display name; absent when nobody gave one, in which case read `fileName`.
+        fileName:
+          type: string
+        fileSize:
+          type: integer
+          format: int64
+        mimeType:
+          type: string
+          description: The type the BYTES are, detected at write time — never the declared one.
+        writtenBy:
+          type: string
+          format: uuid
+          description: |
+            The organization member who wrote this version: the member who attached, replaced or
+            renamed it, or the member a keep is booked to.
+        writtenAt:
+          type: string
+          format: date-time
+        downloadUrl:
+          type: string
+          description: |
+            The plane's route for THIS version's bytes, version-pinned: an older version keeps
+            serving its own bytes after a newer one lands.
+
+    RequestFilesResponse:
+      type: object
+      required: [files]
+      properties:
+        files:
+          type: array
+          items:
+            $ref: "#/components/schemas/RequestFile"
+
+    AttachFileForm:
+      type: object
+      required: [file]
+      properties:
+        file:
+          type: string
+          format: binary
+        label:
+          type: string
+          description: Display label; readers fall back to the file name when it is absent.
+        slotId:
+          type: string
+          format: uuid
+          description: |
+            The manifest slot the file answers, when it answers one. Optional and usually absent;
+            when given it must be a slot of this request's own manifest version.
+
+    ReplaceFileForm:
+      type: object
+      required: [file, expectedOrgVersion]
+      properties:
+        file:
+          type: string
+          format: binary
+        expectedOrgVersion:
+          type: integer
+          description: |
+            The `orgVersion` the caller read. A stale one answers `409 version_conflict` and writes
+            nothing, rather than silently overwriting another member's replacement.
+
+    RelabelFileRequest:
+      type: object
+      required: [label]
+      properties:
+        label:
+          type: string
+          description: The new display label. Empty clears it, and readers fall back to the file name.
+
+    RemovedFileResponse:
+      type: object
+      required: [fileId]
+      properties:
+        fileId:
+          type: string
+          format: uuid
+          description: The file that is gone — every version's row and every version's bytes.
+
+    AdoptionsResponse:
+      type: object
+      required: [adoptions, skipped]
+      properties:
+        adoptions:
+          type: array
+          items:
+            $ref: "#/components/schemas/Adoption"
+        skipped:
+          type: array
+          description: |
+            The standing records this keep could NOT take, one entry per record, empty on the
+            ordinary keep. Never a revocation and never a deletion: the grants stand, the records
+            stay listed on the request detail, and a keep retried after the condition lifts takes
+            them.
+          items:
+            $ref: "#/components/schemas/SkippedRecord"
+
+    SkippedRecord:
+      type: object
+      required: [resourceId, participant, reason]
+      properties:
+        resourceId:
+          type: string
+          format: uuid
+          description: |
+            The granted resource this record is — the same id the request detail publishes on the
+            slot's `records`, so the two listings line up without a second call.
+        participant:
+          allOf:
+            - $ref: "#/components/schemas/ParticipantRef"
+          nullable: true
+          description: Whose record this is; `null` for the recipient's own.
+        reason:
+          type: string
+          enum: [participant_ineligible, adoption_refused]
+          description: |
+            `participant_ineligible` — the recipient may no longer answer for that party (they left
+            the company, lost the Manager role, or their membership was revoked), the same condition
+            the request detail renders on an `unavailable` record; `adoption_refused` — this record
+            itself cannot be kept.
+        message:
+          type: string
+          description: The refusal as worded for the operator.
+
+    DrainResponse:
+      type: object
+      required: [materialized, stillPending]
+      properties:
+        materialized:
+          type: integer
+        stillPending:
+          type: integer
+
+    ProposalsResponse:
+      type: object
+      required: [proposals]
+      properties:
+        proposals:
+          type: array
+          items:
+            $ref: "#/components/schemas/Proposal"
+
+    ProposalCandidateResponse:
+      type: object
+      required: [proposal, version, name, data]
+      properties:
+        proposal:
+          $ref: "#/components/schemas/Proposal"
+        version:
+          type: integer
+        name:
+          type: string
+        schemaRef:
+          type: string
+        data:
+          type: object
+          additionalProperties: true
+
+    DismissResponse:
+      type: object
+      required: [dismissed]
+      properties:
+        dismissed:
+          type: boolean

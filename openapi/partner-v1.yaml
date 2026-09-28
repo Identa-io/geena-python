@@ -1,0 +1,1165 @@
+# The partner plane's contract (/partner/v1). This document is the single source of truth for the
+# plane's routes: the Go registrar and server interface are generated from it (`make oapi`), and
+# cmd/identa binds the generated registrar through the engine's gated PartnerRouter — so an
+# operation added here is wired with authentication + the security gate by construction, and the
+# published contract cannot drift from the code.
+#
+# Two conventions are load-bearing:
+#
+#   - Path ids are documented as UUIDs but generated as Go strings (x-go-type): the handlers map a
+#     malformed id to the same oracle-shaped `404 not_found` as a foreign one (D34 — probing learns
+#     nothing), so the generated wrapper must never intercept it with a 400 of its own.
+#   - Parameter names must stay exactly `requestId` / `slotId` / `fileId` / `kind` / `target`:
+#     they become the echo route params the handlers read. The same holds for the `participant`
+#     query parameter, which the handlers read by name (`c.QueryParam("participant")`) rather than
+#     from the generated params struct — renaming it here alone would compile and silently break
+#     every participant-scoped fill.
+openapi: 3.0.3
+info:
+  title: Identa Partner API
+  version: "1.0"
+  description: |
+    The partner plane: a partner app, riding an OAuth partner token issued for one user, drives
+    the data request it holds with that user — reading granted items, offering an in-app picker
+    over slot candidates, attaching picks, creating slot-bound values, and delegated
+    writes/deletes.
+
+    Authorization is the grant, never the token's scope: tokens carry identity only (`profile`),
+    and every call re-checks the connection (active request, owning organization, recipient user)
+    and the per-item grant. Every serve, list, attach, create, write and delete is receipted to
+    the user's TOOK ledger with the app's client id. Ungranted, foreign, malformed and nonexistent
+    all read as the same `404 not_found` — the oracle rule: probing learns nothing.
+
+servers:
+  - url: /partner/v1
+
+security:
+  - partnerToken: []
+
+paths:
+  /requests:
+    get:
+      operationId: listRequests
+      summary: List this app's active connections with the token's user
+      description: |
+        Connection discovery: every active request this app's owning organization holds with the
+        token's user, so a client can find its request ids without out-of-band state — the
+        assertion-tier path, and recovery for code-ceremony clients (the code exchange also
+        returns `request_id`). Metadata only, all of it org-authored (the org created these
+        requests): nothing from the vault is read, so the call is unreceipted. Pending
+        invitations are not listed — a request appears once the user has consented.
+      responses:
+        "200":
+          description: The app's active connections with this user.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ConnectionsResponse"
+        default:
+          $ref: "#/components/responses/Error"
+
+  /requests/{requestId}/status:
+    parameters:
+      - $ref: "#/components/parameters/requestId"
+    get:
+      operationId: getRequestStatus
+      summary: Connection state and per-slot grant status
+      description: |
+        The app's drive surface: the request's effective state, the manifest's presentation
+        groups, and per slot — granted or pending, nothing else. `pending` is indistinguishable
+        from "the user refused" and from "the user has no such data" (the oracle rule). Granted
+        slots carry verification metadata (what was checked, how strong, when) for their current
+        version only. Slot ids returned here are the canonical item addresses (D38).
+
+        A slot can go back to `pending`: deleting the resource that answered it drops the grant
+        with it, so status is a live reading and never a latch. Re-read it rather than caching
+        the first `granted` you see.
+
+        A slot the manifest asks about someone other than the recipient stays a single item here,
+        whatever its cast: `granted` means at least one party has answered it. Who answered — and
+        how many — is visible only through this response's `participants`, and per record when
+        the slot is served.
+      responses:
+        "200":
+          description: The request's state, groups and items.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/StatusResponse"
+        default:
+          $ref: "#/components/responses/Error"
+
+  /requests/{requestId}/slots/{slotId}:
+    parameters:
+      - $ref: "#/components/parameters/requestId"
+      - $ref: "#/components/parameters/slotId"
+    get:
+      operationId: getSlot
+      summary: Serve one granted slot
+      description: |
+        Decrypts the slot's granted resource(s) from the user's vault at call time and returns
+        them; the TOOK receipt is written before the response — no byte leaves without its
+        receipt. Needs no verb — reading what the user granted is what a connection is. Files
+        are served as metadata plus a
+        `downloadUrl` pointing at the slot's file-content route, never as inline bytes.
+      responses:
+        "200":
+          description: The slot's records, decrypted.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ItemResponse"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "423":
+          $ref: "#/components/responses/Sealed"
+        default:
+          $ref: "#/components/responses/Error"
+    put:
+      operationId: writeSlot
+      summary: Write a new version of one granted document
+      description: |
+        Delegated write (M6): stores a new version of the slot's single granted structured
+        document on the user's behalf. Writes update, they never create — the grant must already
+        exist. Requires the slot's `edit` verb; schema, uniqueness and creation audit stay the
+        user's; provenance records the writing app. Receipted before the mutation.
+
+        On a `company` subject's slot the record lives in the company's vault: the write goes
+        through when the user holds a live Manager key on that company right now, exactly the
+        standing the fill and serve paths re-check, and answers `409 participant_ineligible` once
+        they do not. A `person` subject's slot stays read-and-fill only: a family member's data is
+        changed first-party (`403 subject_item_readonly`).
+
+        The stored version is then announced to every connection holding a grant on that record,
+        INCLUDING the one you wrote through: the organization's retained copy is a separate thing
+        from the source you just changed, so this request gets an update proposal, or an automatic
+        keep, under the adoption policy its accepted manifest set for the item.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/WriteRequest"
+      responses:
+        "200":
+          description: The new version that was stored.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/WriteResponse"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "409":
+          $ref: "#/components/responses/Ambiguous"
+        "423":
+          $ref: "#/components/responses/Sealed"
+        default:
+          $ref: "#/components/responses/Error"
+    post:
+      operationId: createSlotItem
+      parameters:
+        - $ref: "#/components/parameters/participant"
+      summary: Create a new value and grant it to the slot
+      description: |
+        Slot-bound create (the recorded amendment of "writes never create"): with the user
+        present, the app submits the value the manifest asked for; it lands in the user's vault
+        — or, for a subject-bearing slot, in the named participant's vault (`participant`, an
+        alias from the subject's candidates: a family member, or a company the user manages) —
+        and is granted to the slot in the same act. Always-create: a fresh resource every time,
+        never colliding with or probing for existing data. Structured documents arrive as JSON
+        (schema-locked to the slot); files as multipart/form-data. Identification-document slots
+        refuse — the capture ceremony is their only create path (IDN-5). Requires the slot's
+        `fill` verb; receipted; provenance records the app.
+
+        The participant may be given either as the `participant` query parameter or as a
+        `participant` field in the body (a JSON property, or a multipart part); the query
+        parameter wins when both are present.
+
+        Cardinality (slot-cardinality): on a single slot (`multiple: false`, the default) the
+        fresh resource replaces the standing grant — for a subject slot, the named participant's
+        standing grant only. A concurrent fill of the same request answers `409 slot_conflict`;
+        re-list and retry.
+
+        Participants: a subject the manifest asks about once cannot be answered by two different
+        participants, and one participant cannot play two subjects of one request. `participant`
+        is checked before anything is written, but the decision is re-made inside the write — a
+        fill that loses that race answers `409 participant_conflict`, and nothing is created.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/CreateDocumentRequest"
+          multipart/form-data:
+            schema:
+              $ref: "#/components/schemas/CreateFileForm"
+      responses:
+        "200":
+          description: The created, granted resource.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/CreateResponse"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "423":
+          $ref: "#/components/responses/Sealed"
+        default:
+          $ref: "#/components/responses/Error"
+    delete:
+      operationId: deleteSlot
+      summary: Delete one granted document
+      description: |
+        Delegated delete (M6): the user's own hard delete of the slot's single granted structured
+        document — every version, no tombstone; the receipt ledger outlives the data. Requires
+        the slot's `edit` verb — update and delete are one permission, because whoever may
+        overwrite a value may already destroy it. Platform-protected (unique-per-vault) documents refuse with
+        `403 delete_refused`. Only the recipient's own records are deleted this way: a `company`
+        subject's record answers `404 not_found` here (see `writeSlot` for the company lane).
+      responses:
+        "204":
+          description: Deleted.
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "409":
+          $ref: "#/components/responses/Ambiguous"
+        default:
+          $ref: "#/components/responses/Error"
+
+  /requests/{requestId}/slots/{slotId}/candidates:
+    parameters:
+      - $ref: "#/components/parameters/requestId"
+      - $ref: "#/components/parameters/slotId"
+    get:
+      operationId: listSlotCandidates
+      parameters:
+        - $ref: "#/components/parameters/participant"
+      summary: Enumerate the user's resources that could back one slot
+      description: |
+        The data behind the app's native picker. Slot-scoped and connection-bound: only what the
+        accepted manifest asked for (kind/target-matched), only while the request is active, and
+        only with the slot's `fill` verb — there is no vault-wide listing on the partner plane.
+        Metadata only, never content, so it works against a sealed vault. The enumeration is
+        itself receipted (`listed`, coalesced per app + slot + 15 minutes).
+
+        Subject-bearing slots require `participant` (an alias from the subject's candidates) and
+        enumerate inside that participant's vault — a family member's, or a company the user
+        manages; recipient slots refuse it with `422 participant_not_allowed`.
+      responses:
+        "200":
+          description: The slot's candidates, with the current picks marked.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/CandidatesResponse"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        default:
+          $ref: "#/components/responses/Error"
+
+  /requests/{requestId}/slots/{slotId}/attach:
+    parameters:
+      - $ref: "#/components/parameters/requestId"
+      - $ref: "#/components/parameters/slotId"
+    post:
+      operationId: attachSlot
+      summary: Turn the user's in-app pick into a grant
+      description: |
+        The user's tap in the app is the approval: mints the grant for the picked candidate, with
+        `partner_app` provenance and the client id on both grant and receipt. Idempotent —
+        re-attaching an already granted resource confirms without a second receipt. The resource
+        must be the user's own and match the slot; any failure reads `404 not_found`.
+
+        Cardinality (slot-cardinality): on a single slot (`multiple: false`, the default) an
+        attach of a DIFFERENT resource replaces the standing grant — the second consent
+        supersedes the first. A concurrent fill of the same request answers `409 slot_conflict`;
+        re-list and retry.
+
+        Participants: a subject the manifest asks about once cannot be answered by two different
+        participants, and one participant cannot play two subjects of one request. `participant`
+        is checked before anything is written, but the decision is re-made inside the write — a
+        fill that loses that race answers `409 participant_conflict`.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/AttachRequest"
+      responses:
+        "200":
+          description: The grant now backing the slot.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/AttachResponse"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        default:
+          $ref: "#/components/responses/Error"
+
+  /requests/{requestId}/slots/{slotId}/files/{fileId}:
+    parameters:
+      - $ref: "#/components/parameters/requestId"
+      - $ref: "#/components/parameters/slotId"
+      - $ref: "#/components/parameters/fileId"
+    get:
+      operationId: getSlotFileContent
+      summary: Stream the decrypted content of one granted file
+      description: |
+        The partner plane's only file-content route: the file must be granted on this very slot
+        of this active connection — the grant is the whole authorization, no verb beyond it — and the serve is receipted before
+        the first byte leaves. Responds with the file's own Content-Type and a
+        `Content-Disposition: attachment` header.
+      responses:
+        "200":
+          description: The decrypted file bytes (Content-Type is the file's own).
+          content:
+            application/octet-stream:
+              schema:
+                type: string
+                format: binary
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "423":
+          $ref: "#/components/responses/Sealed"
+        default:
+          $ref: "#/components/responses/Error"
+
+  /requests/{requestId}/subjects/{subjectId}/candidates:
+    parameters:
+      - $ref: "#/components/parameters/requestId"
+      - $ref: "#/components/parameters/subjectId"
+    get:
+      operationId: listSubjectCandidates
+      summary: Enumerate the participants who could answer one subject
+      description: |
+        The subject half of the fill surface: who the user could put behind one subject of this
+        manifest, in the lane the subject's `type` dispatches on.
+
+        `person` — the user's family-member vaults whose relation matches the subject's
+        declaration. `company` — the shared legal-entity vaults the user may represent right now
+        (a live Manager key; ownership alone is not enough, and an editor may change a company's
+        data without being able to hand it to a third party), each carrying the registration
+        `details` read from the company's own record in the user's key context.
+
+        Both lanes drop anyone already answering a DIFFERENT subject of this request — one
+        participant, one role per connection — while a participant already answering THIS subject
+        stays listed, marked `bound`.
+
+        Entries carry the pairwise alias and the vault's owner-typed label; label and details
+        appear in exactly this response and on no other partner surface. Requires `fill` on at
+        least one of the subject's slots; receipted (`listed`, coalesced, anchored to the
+        subject's first `fill` slot).
+      responses:
+        "200":
+          description: The subject's participant candidates.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/SubjectCandidatesResponse"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        default:
+          $ref: "#/components/responses/Error"
+
+  /requests/{requestId}/subjects/{subjectId}/participants:
+    parameters:
+      - $ref: "#/components/parameters/requestId"
+      - $ref: "#/components/parameters/subjectId"
+    post:
+      operationId: createSubjectParticipant
+      summary: Add the participant who will answer this subject — a family member, or a company the user founds
+      description: |
+        The "add" act of the subject fill surface (subjects-fill-v2). The app supplies a name and
+        nothing else; what is minted follows the subject's `type`:
+
+        `person` — a family-member vault owned by the user. The relation comes from the subject's
+        declaration, never from the app; the label is the user-typed name, write-once across this
+        plane and never served back (the user renames it first-party).
+
+        `company` — a legal-entity shared vault founded by the user, exactly as `sharedVaultCreate`
+        founds one first-party: the user is its owner with a live Manager key, so the company
+        appears among this subject's candidates at once and its records may answer the subject's
+        slots. Registration details are not taken here; they are filled into the subject's slots
+        like any other record. Collaborators, the UBO structure and Creditsafe enrichment stay
+        first-party. A deployment without the founding handler answers `409
+        subject_kind_unsupported`.
+
+        No TOOK row is written in either lane (nothing was taken — the vault is the user's own
+        state; its later grants are the receipts). Not idempotent: apps single-flight the button.
+        Requires `fill` on at least one of the subject's slots.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/SubjectParticipantCreateRequest"
+      responses:
+        "200":
+          description: The new participant, ready to answer slots via `participant=<alias>`.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/SubjectParticipantCreateResponse"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "409":
+          $ref: "#/components/responses/Conflict"
+        "423":
+          $ref: "#/components/responses/Sealed"
+        default:
+          $ref: "#/components/responses/Error"
+
+  /requests/{requestId}/items/{kind}/{target}:
+    parameters:
+      - $ref: "#/components/parameters/requestId"
+      - $ref: "#/components/parameters/kind"
+      - $ref: "#/components/parameters/target"
+    get:
+      operationId: getItem
+      summary: Serve one granted item by its legacy (kind, target) address
+      description: |
+        The legacy address: works exactly as long as the (kind, target) pair is unique in the
+        accepted manifest, and answers `409 ambiguous_item` once it is not — never a guess
+        between two slots. Prefer the canonical slot address from `/status` (D38). Same serving
+        semantics as the slot route.
+      responses:
+        "200":
+          description: The item's records, decrypted.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ItemResponse"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "409":
+          $ref: "#/components/responses/Ambiguous"
+        "423":
+          $ref: "#/components/responses/Sealed"
+        default:
+          $ref: "#/components/responses/Error"
+    put:
+      operationId: writeItem
+      summary: Write a new version by the legacy (kind, target) address
+      description: Legacy-addressed delegated write — same semantics as the slot write.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/WriteRequest"
+      responses:
+        "200":
+          description: The new version that was stored.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/WriteResponse"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "409":
+          $ref: "#/components/responses/Ambiguous"
+        "423":
+          $ref: "#/components/responses/Sealed"
+        default:
+          $ref: "#/components/responses/Error"
+    delete:
+      operationId: deleteItem
+      summary: Delete by the legacy (kind, target) address
+      description: Legacy-addressed delegated delete — same semantics as the slot delete.
+      responses:
+        "204":
+          description: Deleted.
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "409":
+          $ref: "#/components/responses/Ambiguous"
+        default:
+          $ref: "#/components/responses/Error"
+
+components:
+  securitySchemes:
+    partnerToken:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT
+      description: |
+        A partner access token from POST /oauth/token (RFC 7523 assertion or refresh grant),
+        carrying `token_use=partner`, the client id and the `profile` scope, bound to one user's
+        partner session. First-party tokens are refused on this plane.
+
+  parameters:
+    # x-go-type string on the id params: binding must be pass-through so the handlers keep
+    # mapping malformed ids to oracle-shaped 404s (see the header comment).
+    requestId:
+      name: requestId
+      in: path
+      required: true
+      description: The data request (connection) id.
+      schema:
+        type: string
+        format: uuid
+        x-go-type: string
+    slotId:
+      name: slotId
+      in: path
+      required: true
+      description: The slot's canonical id, as returned by `/status` (D38).
+      schema:
+        type: string
+        format: uuid
+        x-go-type: string
+    fileId:
+      name: fileId
+      in: path
+      required: true
+      description: The granted file's resource id.
+      schema:
+        type: string
+        format: uuid
+        x-go-type: string
+    subjectId:
+      name: subjectId
+      in: path
+      required: true
+      description: The manifest subject's author-chosen id (e.g. "child"), from `/status`.
+      schema:
+        type: string
+    participant:
+      name: participant
+      in: query
+      required: false
+      description: |
+        A participant's pairwise alias — a family member's or a company's — from the subject's
+        candidates or a participant create. Required on subject-bearing slots
+        (`422 participant_required`); refused on recipient slots
+        (`422 participant_not_allowed`).
+      schema:
+        type: string
+        format: uuid
+        x-go-type: string
+    kind:
+      name: kind
+      in: path
+      required: true
+      description: The slot's capability kind as published in the manifest (e.g. `id_document`, `personal_files`).
+      schema:
+        type: string
+    target:
+      name: target
+      in: path
+      required: true
+      description: |
+        The slot's target (schema name, document type, …), as a plain path segment or
+        base64url-encoded when it contains spaces or slashes.
+      schema:
+        type: string
+
+  responses:
+    Error:
+      description: |
+        Error. Handler errors carry `{error, message}` with a stable machine-readable code:
+        `partner_token_required`, `unknown_client`, `organization_suspended`,
+        `connection_inactive`, `not_found`, `verb_not_granted`, `ambiguous_item`,
+        `invalid_body`, `invalid_document`, `unsupported_item`, `delete_refused`, `sealed`,
+        `server_error`, and the participant vocabulary: `participant_required` (422 — a
+        subject-bearing slot was filled without saying who), `participant_unknown` (404 — the
+        alias names nobody the user may answer with, or it names a different participant than
+        the resource does), `participant_ineligible` (403 — the named participant may not answer
+        THIS subject: wrong relation, already cast in another role, or the subject asks about
+        one participant and someone else already answers it), `participant_not_allowed` (422 —
+        a participant was named on a recipient slot, which is about the account holder),
+        `subject_kind_unsupported` (409 — the act does not apply to this subject's kind).
+        Security-gate refusals (missing scope, step-up required) instead answer 403 with the
+        platform's `{"errors":[{"message","extensions"}]}` envelope.
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/Error"
+    BadRequest:
+      description: The body is missing, malformed, or fails the slot's schema.
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/Error"
+    Forbidden:
+      description: The act is refused (e.g. `delete_refused`, `verb_not_granted`).
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/Error"
+    NotFound:
+      description: |
+        Ungranted, foreign, malformed or nonexistent — deliberately indistinguishable
+        (`not_found`; the oracle rule).
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/Error"
+    Ambiguous:
+      description: |
+        `ambiguous_item` — the address resolves to several slots/records; use the canonical
+        slot address from `/status`.
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/Error"
+    Conflict:
+      description: |
+        The act cannot be applied as asked. `subject_kind_unsupported` — this subject is not a
+        person, so it has no "add" act on this plane (a company is joined first-party and then
+        appears among the subject's candidates).
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/Error"
+    Sealed:
+      description: |
+        `sealed` — the user's L2/L3 vault is sealed; the entitlement is real but the key context
+        needs the user's own step-up. Ask the user to sign in (or drive POST /oauth/step-up).
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/Error"
+
+  schemas:
+    Error:
+      type: object
+      required: [error, message]
+      properties:
+        error:
+          type: string
+          description: Stable machine-readable code.
+        message:
+          type: string
+
+    ConnectionsResponse:
+      type: object
+      required: [requests]
+      properties:
+        requests:
+          type: array
+          items:
+            $ref: "#/components/schemas/ConnectionItem"
+
+    ConnectionItem:
+      type: object
+      required: [requestId, manifestId, manifestVersion, state]
+      properties:
+        requestId:
+          type: string
+          format: uuid
+          description: Address every other route on this plane with it.
+        manifestId:
+          type: string
+          format: uuid
+        manifestName:
+          type: string
+          description: The manifest's org-authored display name.
+        manifestVersion:
+          type: integer
+          description: The version pinned at consent — re-publishing never widens a live connection.
+        state:
+          type: string
+          description: Effective state, evaluated now. Always `active` — inactive connections are not listed.
+
+    StatusResponse:
+      type: object
+      required: [state, items]
+      properties:
+        state:
+          type: string
+          description: The request's effective state, evaluated now (e.g. `active`, `expired`).
+        groups:
+          type: array
+          description: The manifest's presentation groups (D37) — rendering structure only.
+          items:
+            $ref: "#/components/schemas/StatusGroup"
+        subjects:
+          type: array
+          description: |
+            The parties this manifest asks about beyond the recipient (the ASK — people and
+            companies alike).
+          items:
+            $ref: "#/components/schemas/StatusSubject"
+        participants:
+          type: array
+          description: |
+            The ANSWER to `subjects`: who is actually cast, derived from the grants and never
+            stored. Absent while nobody is bound. Each entry is a pairwise alias — the same
+            handle the subject's candidates hand out and the same one served records carry — so
+            an app can group a connection's records by party without ever seeing a vault id.
+          items:
+            $ref: "#/components/schemas/StatusParticipant"
+        items:
+          type: array
+          items:
+            $ref: "#/components/schemas/StatusItem"
+
+    StatusGroup:
+      type: object
+      required: [id, label, order]
+      properties:
+        id:
+          type: string
+        label:
+          type: string
+        order:
+          type: integer
+
+    StatusSubject:
+      type: object
+      required: [id, type, repeat]
+      properties:
+        id:
+          type: string
+        type:
+          $ref: "#/components/schemas/ParticipantType"
+        relation:
+          type: string
+          description: |
+            The subject's declared kinship to the recipient. Present on `person` subjects only —
+            a company has none.
+        label:
+          type: string
+        repeat:
+          type: boolean
+          description: |
+            0..N participants — the recipient chooses how many by binding family members or
+            companies.
+
+    ParticipantType:
+      type: string
+      enum: [person, company]
+      description: |
+        The lane a subject dispatches on: `person` is answered from a family-member vault,
+        `company` from a shared legal-entity vault the user may represent.
+
+    StatusParticipant:
+      type: object
+      required: [subjectId, type, alias]
+      properties:
+        subjectId:
+          type: string
+          description: The subject this party answers.
+        type:
+          $ref: "#/components/schemas/ParticipantType"
+        alias:
+          type: string
+          format: uuid
+          description: |
+            The pairwise participant handle: stable across this organization's connections,
+            meaningless outside them. Never a vault id.
+
+    StatusItem:
+      type: object
+      required: [slotId, kind, verbs, status]
+      properties:
+        slotId:
+          type: string
+          format: uuid
+          description: The canonical item address (D38) — serve it at `/slots/{slotId}`.
+        label:
+          type: string
+        group:
+          type: string
+        subject:
+          type: string
+          description: The ManifestSubject this slot is about; absent = the recipient.
+        multiple:
+          type: boolean
+          description: |
+            The slot's cardinality (slot-cardinality): `false` — the default — means ONE standing
+            grant, and a fill with a different resource replaces it; `true` means grants accrue.
+            Gate any "add another" affordance on this. On a subject slot the count is per
+            answering participant (one per child or company, not one per slot).
+        kind:
+          type: string
+        target:
+          type: string
+        verbs:
+          type: array
+          description: |
+            What this connection may do with the item BEYOND reading it: `fill` (list the slot's
+            candidates, attach one, create a slot-bound value), `edit` (update or delete the
+            granted document on the user's behalf), `keep` (the organization holds a copy that
+            survives revocation, and receives later versions). Empty is ordinary and means the
+            plain ask — readable while the connection is active, nothing more.
+          items:
+            type: string
+        status:
+          type: string
+          enum: [granted, pending]
+          description: |
+            `pending` is indistinguishable from "refused" and from "no such data" (the oracle
+            rule).
+        verification:
+          type: array
+          description: |
+            Assurance metadata for the CURRENT version of a granted item — what was checked, how
+            strong, when. Never evidence; present for granted items only.
+          items:
+            $ref: "#/components/schemas/StatusVerification"
+
+    StatusVerification:
+      type: object
+      required: [method, level, verifiedAt, version]
+      properties:
+        method:
+          type: string
+        level:
+          type: string
+        verifiedAt:
+          type: string
+          format: date-time
+        version:
+          type: integer
+
+    ItemResponse:
+      type: object
+      required: [slotId, kind]
+      properties:
+        slotId:
+          type: string
+          format: uuid
+        label:
+          type: string
+        group:
+          type: string
+        subject:
+          type: string
+          description: |
+            The ManifestSubject this slot is about; absent = the recipient. The ASK, exactly as on
+            `/status` — who actually answered it is each record's own `participant`.
+        kind:
+          type: string
+        target:
+          type: string
+        records:
+          type: array
+          description: |
+            One entry per granted resource. On a subject-bearing slot that is one entry PER PARTY
+            the recipient bound — three children means three records — each carrying its own
+            `participant` block.
+          items:
+            $ref: "#/components/schemas/ServedRecord"
+
+    ServedRecord:
+      type: object
+      description: |
+        One decrypted record. Shape depends on `type`:
+        `document` — `{resourceId, type, version, name, data}`;
+        `id_document` — `{resourceId, type, documentType, name, ocr, verification, images}`;
+        `file` — `{resourceId, type, version, label, fileName, mimeType, fileSize, downloadUrl}`
+        (content flows only through the `downloadUrl` slot-file route, never inline).
+
+        A file's `version` tracks its BYTES. Renaming a file changes its `label` in place and
+        leaves the version — and the `downloadUrl` it pins — alone, so a client polling `version`
+        sees a rename as no change at all, which is what it is.
+
+        EVERY record also carries `participant`: `{subjectId, type, alias}` naming the party it
+        belongs to, or `null` for the recipient's own data (the connection is with them, so there
+        is nobody to name). The key is always present, so `participant === null` and "no
+        participant key" never have to be told apart. The alias is the same pairwise handle
+        `/status`'s `participants` and the subject candidates use.
+
+        A record may instead arrive as `{resourceId, participant, status: "unavailable", reason}`
+        with no `type` and no data. Read every record's `status` before its `type`, and treat an
+        unknown `status` as unavailable. Two reasons exist, and they mean opposite things:
+
+        `participant_ineligible` — a statement about the USER: they can no longer speak for the
+        party that answered, typically a company vault they have been removed from or demoted in.
+        The grant is untouched and copies already kept are unaffected; if the user regains the
+        role the record serves again with no re-consent. Act on it.
+
+        `record_unreadable` — a statement about THIS SERVER: the record could not be produced.
+        It is not consent withdrawn, so do not drop the party or ask for re-consent on it; retry
+        later and report it if it persists. It is rendered per record so that one bad record
+        cannot hide the rest of a slot; a slot on which NOTHING could be read fails with `500`
+        rather than reporting itself as unavailable.
+
+        A record whose resource left the recipient's own vaults is neither: it is simply absent
+        from `records`, indistinguishable from a slot that was never granted (which is `404`).
+
+        The same loss of standing on the file-content route is an ordinary `404` instead: a byte
+        stream has no envelope to carry a state, and the record surface is where the reason is
+        rendered.
+      additionalProperties: true
+
+    SubjectCandidatesResponse:
+      type: object
+      required: [subjectId, type, participants]
+      properties:
+        subjectId:
+          type: string
+        type:
+          $ref: "#/components/schemas/ParticipantType"
+        relation:
+          type: string
+          description: |
+            The subject's declared relation — the only relation these candidates have. Present on
+            `person` subjects only.
+        label:
+          type: string
+          description: The subject's recipient-facing label ("Each child you cover").
+        repeat:
+          type: boolean
+          description: |
+            Whether this subject takes 0..N participants. `false` means the connection asks about
+            exactly one, so binding a second answers `403 participant_ineligible`.
+        participants:
+          type: array
+          items:
+            $ref: "#/components/schemas/SubjectParticipantCandidate"
+
+    SubjectParticipantCandidate:
+      type: object
+      required: [alias, label, bound]
+      properties:
+        alias:
+          type: string
+          format: uuid
+          description: The pairwise participant handle — the only identifier apps ever hold.
+        label:
+          type: string
+          description: |
+            The vault's owner-typed label — a family member's name, or the company's. Appears in
+            exactly this response and on no other partner surface.
+        bound:
+          type: boolean
+          description: Whether this participant already answers this subject.
+        details:
+          $ref: "#/components/schemas/ParticipantDetails"
+
+    ParticipantDetails:
+      type: object
+      description: |
+        What a user needs to tell two of their companies apart in a picker, read from the
+        company's own record in the user's key context. Company candidates only, best-effort:
+        absent when the record does not exist yet or cannot be opened (a sealed vault degrades
+        the row, never the listing). Never present on a person candidate.
+      properties:
+        registrationCountry:
+          type: string
+        registrationNumber:
+          type: string
+
+    SubjectParticipantCreateRequest:
+      type: object
+      required: [label]
+      properties:
+        label:
+          type: string
+          maxLength: 120
+          description: |
+            The user-typed name: the family member's, or the company's name as the user knows it.
+            Write-once here.
+
+    SubjectParticipantCreateResponse:
+      type: object
+      required: [alias, label]
+      properties:
+        alias:
+          type: string
+          format: uuid
+        label:
+          type: string
+
+    CandidatesResponse:
+      type: object
+      required: [slotId, kind, candidates]
+      properties:
+        slotId:
+          type: string
+          format: uuid
+        kind:
+          type: string
+        target:
+          type: string
+        candidates:
+          type: array
+          items:
+            $ref: "#/components/schemas/CandidateItem"
+
+    CandidateItem:
+      type: object
+      required: [resourceId, type, createdAt, granted]
+      description: >-
+        One pickable vault resource. Document rows carry their current `data` when the user's
+        key context can open them (amended 2026-08-14; the launch shape was metadata-only) —
+        the serving is covered by the slot's coalesced `listed` receipt. A row whose content
+        cannot be decrypted (sealed vault, cold keys) degrades to metadata. Files and
+        ID documents are always metadata-only: their content flows exclusively through
+        grants and the serving/streaming routes.
+      properties:
+        resourceId:
+          type: string
+          format: uuid
+        type:
+          type: string
+          enum: [document, id_document, file]
+        name:
+          type: string
+          description: Document / ID-document display name.
+        label:
+          type: string
+          description: File label.
+        fileName:
+          type: string
+        mimeType:
+          type: string
+        fileSize:
+          type: integer
+          format: int64
+        documentType:
+          type: string
+          description: ID-document type (e.g. `Passport`).
+        data:
+          type: object
+          additionalProperties: true
+          description: Current document data (documents only); absent when undecryptable.
+        version:
+          type: integer
+        createdAt:
+          type: string
+          format: date-time
+        updatedAt:
+          type: string
+          format: date-time
+        granted:
+          type: boolean
+          description: Marks candidates already backing this slot, so the app can render the current pick.
+
+    AttachRequest:
+      type: object
+      required: [resourceId]
+      properties:
+        resourceId:
+          type: string
+          format: uuid
+          description: A candidate's resource id, from the slot's candidates listing.
+        participant:
+          type: string
+          format: uuid
+          description: |
+            The participant the resource belongs to (their pairwise alias) — a family member, or
+            a company the user manages. Required on subject-bearing slots
+            (`422 participant_required`); refused on recipient slots
+            (`422 participant_not_allowed`). The alias only says who the app MEANT: the resource
+            itself decides which vault is checked, so naming one participant's alias with another
+            participant's resource answers `404 participant_unknown`.
+
+    AttachResponse:
+      type: object
+      required: [slotId, resourceId, granted]
+      properties:
+        slotId:
+          type: string
+          format: uuid
+        resourceId:
+          type: string
+          format: uuid
+        granted:
+          type: boolean
+        alreadyGranted:
+          type: boolean
+          description: Present when the pick merely confirmed an existing grant (idempotent re-attach).
+
+    WriteRequest:
+      type: object
+      required: [data]
+      properties:
+        data:
+          type: object
+          additionalProperties: true
+          description: The document's new content; validated against the document's own schema.
+        name:
+          type: string
+          description: Optional new display name.
+
+    WriteResponse:
+      type: object
+      required: [slotId, kind, resourceId, version]
+      properties:
+        slotId:
+          type: string
+          format: uuid
+        kind:
+          type: string
+        target:
+          type: string
+        resourceId:
+          type: string
+          format: uuid
+        version:
+          type: integer
+
+    CreateDocumentRequest:
+      type: object
+      required: [data]
+      properties:
+        data:
+          type: object
+          additionalProperties: true
+          description: The document's content; validated against the SLOT's schema, whatever the app sends.
+        name:
+          type: string
+          description: Display name; defaults to the slot's label, then its target.
+        description:
+          type: string
+        participant:
+          type: string
+          format: uuid
+          description: |
+            The participant whose vault the value lands in — the body form of the `participant`
+            query parameter, which wins when both are given.
+
+    CreateFileForm:
+      type: object
+      required: [file]
+      properties:
+        file:
+          type: string
+          format: binary
+        label:
+          type: string
+          description: Display label; defaults to the uploaded file name.
+        participant:
+          type: string
+          format: uuid
+          description: |
+            The participant whose vault the file lands in — the multipart form of the
+            `participant` query parameter, which wins when both are given.
+
+    CreateResponse:
+      type: object
+      required: [slotId, resourceId, version, granted]
+      properties:
+        slotId:
+          type: string
+          format: uuid
+        resourceId:
+          type: string
+          format: uuid
+        version:
+          type: integer
+        granted:
+          type: boolean
