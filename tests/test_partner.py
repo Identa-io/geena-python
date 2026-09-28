@@ -204,7 +204,9 @@ async def test_download_streams_and_relays_headers(client: GeenaClient, geena: F
     )
     download = await client.partner.download_file("a-1", REQ, SLOT, "f1")
     assert download.headers["content-type"] == "application/pdf"
+    assert not download.closed
     assert await download.read() == b"bytes"
+    assert download.closed
 
     geena.on(
         "GET",
