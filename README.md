@@ -38,7 +38,7 @@ from geena.pkce import challenge_for, new_state, new_verifier
 geena = GeenaClient(
     "https://api.test.geena.eu",
     client_id="acme-portal",
-    client_secret=SECRET,                                  # backend only, never in a browser
+    client_secret=SECRET,  # backend only, never in a browser
     dashboard_base_url="https://dashboard.test.geena.eu",  # deep links + the step-up page
 )
 ```
@@ -49,7 +49,7 @@ server-side, keyed by `state`, for the return:
 ```python
 verifier, state = new_verifier(), new_state()
 url = geena.oauth.authorize_url(
-    redirect_uri="https://app.example.com/geena/callback",   # exactly a registered origin
+    redirect_uri="https://app.example.com/geena/callback",  # exactly a registered origin
     state=state,
     code_challenge=challenge_for(verifier),
     manifest_id=MANIFEST_ID,
@@ -60,22 +60,24 @@ url = geena.oauth.authorize_url(
 address of everything on the partner plane:
 
 ```python
-tokens = await geena.oauth.exchange_code(code=code, code_verifier=verifier, redirect_uri=redirect_uri)
-stored = TokenSet.from_response(tokens)      # persist: access token, expiry, refresh token, request_id
-claims = geena.oauth.decode_claims(tokens.access_token)   # sub + email, for your own bookkeeping
+tokens = await geena.oauth.exchange_code(
+    code=code, code_verifier=verifier, redirect_uri=redirect_uri
+)
+stored = TokenSet.from_response(tokens)  # persist: access token, expiry, refresh token, request_id
+claims = geena.oauth.decode_claims(tokens.access_token)  # sub + email, for your own bookkeeping
 ```
 
 **Read and fill**, always with a fresh access token:
 
 ```python
-stored = await ensure_fresh(stored, geena.oauth)          # hold a row lock around this; persist the result
+stored = await ensure_fresh(stored, geena.oauth)  # hold a row lock around this; persist the result
 status = await geena.partner.status(stored.access_token, stored.request_id)
 for item in status.items:
     if item.granted:
         slot = await geena.partner.serve_slot(stored.access_token, stored.request_id, item.slot_id)
-        for record in slot.records:            # one per party on a subject slot
+        for record in slot.records:  # one per party on a subject slot
             if record.available:
-                ...                            # record.data / record.download_url / record.participant
+                ...  # record.data / record.download_url / record.participant
     elif item.allows("fill"):
         picks = await geena.partner.candidates(stored.access_token, stored.request_id, item.slot_id)
 ```
@@ -85,13 +87,15 @@ manifest. The token response's `scope` says whether the person is a member; only
 token open `/org/v1`:
 
 ```python
-url = geena.oauth.authorize_url(redirect_uri=..., state=..., code_challenge=..., scope=ORGANIZATION_SCOPE)
+url = geena.oauth.authorize_url(
+    redirect_uri=..., state=..., code_challenge=..., scope=ORGANIZATION_SCOPE
+)
 ...
 tokens = await geena.oauth.exchange_code(...)
 if tokens.grants("organization"):
     detail = await geena.org.request(tokens.access_token, request_id)
-    kept = await geena.org.adopt(tokens.access_token, request_id, slot_id)   # read kept.skipped
-    copies = await geena.org.copies(tokens.access_token, request_id)         # copy.values = the head
+    kept = await geena.org.adopt(tokens.access_token, request_id, slot_id)  # read kept.skipped
+    copies = await geena.org.copies(tokens.access_token, request_id)  # copy.values = the head
 ```
 
 **Errors.** Every refusal is typed: `GeenaAPIError` carries the plane's `status` and stable
