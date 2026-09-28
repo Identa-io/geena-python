@@ -17,7 +17,12 @@ LEGAL_ENTITY = "legal_entity"
 
 
 class Payload(BaseModel):
-    """Geena's JSON is camelCase and may grow fields: read by alias, ignore extras."""
+    """Geena's JSON is camelCase and may grow fields: read by alias, ignore extras.
+
+    Only the fields a caller cannot do without are required; what the server always sends
+    but a reader can live without (timestamps, kinds, routes) is optional, so a partial
+    fixture or an older server never turns a whole response into a validation error.
+    """
 
     model_config = ConfigDict(populate_by_name=True, extra="ignore")
 

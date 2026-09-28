@@ -53,6 +53,11 @@ class Download:
         self._response = response
 
     @property
+    def closed(self) -> bool:
+        """True once the body has been consumed or ``aclose()`` ran."""
+        return self._response.is_closed
+
+    @property
     def headers(self) -> Mapping[str, str]:
         return {
             name: self._response.headers[name]

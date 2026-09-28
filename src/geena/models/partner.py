@@ -154,7 +154,7 @@ class CandidateItem(Payload):
 
 class CandidatesResponse(Payload):
     slot_id: str = Field(alias="slotId")
-    kind: str
+    kind: str | None = None
     target: str | None = None
     candidates: list[CandidateItem] = Field(default_factory=list)
 
@@ -168,7 +168,7 @@ class AttachResponse(Payload):
 
 class WriteResponse(Payload):
     slot_id: str = Field(alias="slotId")
-    kind: str
+    kind: str | None = None
     target: str | None = None
     resource_id: str = Field(alias="resourceId")
     version: int

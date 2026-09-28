@@ -26,7 +26,7 @@ class Request(Payload):
     #: ``org`` (sent from the dashboard) or ``recipient`` (opened from an app's ceremony).
     initiated_by: str = Field(alias="initiatedBy")
     initiating_client_id: str | None = Field(default=None, alias="initiatingClientId")
-    invitation_expires_at: str = Field(alias="invitationExpiresAt")
+    invitation_expires_at: str | None = Field(default=None, alias="invitationExpiresAt")
     created_at: str = Field(alias="createdAt")
 
     @property
@@ -84,7 +84,7 @@ class Adoption(Payload):
 
     adoption_id: str = Field(alias="adoptionId")
     slot_id: str | None = Field(default=None, alias="slotId")
-    item_kind: str = Field(alias="itemKind")
+    item_kind: str | None = Field(default=None, alias="itemKind")
     item_target: str | None = Field(default=None, alias="itemTarget")
     source_resource_id: str = Field(alias="sourceResourceId")
     source_version: int = Field(alias="sourceVersion")
@@ -110,7 +110,7 @@ class Proposal(Payload):
 
     proposal_id: str = Field(alias="proposalId")
     slot_id: str | None = Field(default=None, alias="slotId")
-    item_kind: str = Field(alias="itemKind")
+    item_kind: str | None = Field(default=None, alias="itemKind")
     item_target: str | None = Field(default=None, alias="itemTarget")
     resource_id: str = Field(alias="resourceId")
     new_version: int = Field(alias="newVersion")
@@ -209,7 +209,7 @@ class RequestFile(Payload):
     written_by: str = Field(alias="writtenBy")
     written_at: str = Field(alias="writtenAt")
     #: The plane's version-pinned route for THIS version's bytes.
-    download_url: str = Field(alias="downloadUrl")
+    download_url: str | None = Field(default=None, alias="downloadUrl")
 
     @property
     def kept(self) -> bool:
