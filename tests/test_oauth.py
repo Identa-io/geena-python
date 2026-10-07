@@ -156,20 +156,5 @@ async def test_ensure_fresh_without_a_refresh_token_means_reconnect(client: Geen
         await ensure_fresh(expired, client.oauth)
 
 
-async def test_step_up_handoff_and_verify_url(client: GeenaClient, geena: FakeGeena) -> None:
-    geena.on(
-        "POST",
-        "/oauth/step-up",
-        json_body={
-            "handoffId": "h-1",
-            "token": "t-1",
-            "requiredLevel": 2,
-            "expiresAt": "2026-09-28T12:05:00Z",
-        },
-    )
-    handoff = await client.oauth.step_up("a-1")
-    assert geena.last().headers["Authorization"] == "Bearer a-1"
-    assert handoff.verify_url("https://dashboard.test.geena.eu") == (
-        "https://dashboard.test.geena.eu/verify/step-up?handoff=h-1&token=t-1"
-    )
+async def test_grant_url(client: GeenaClient) -> None:
     assert client.grant_url("req-1") == "https://dashboard.test.geena.eu/personal/connections/req-1"

@@ -22,7 +22,7 @@ from geena.errors import (
     ReconnectRequired,
 )
 from geena.http import Download, Upload
-from geena.oauth import ORGANIZATION_SCOPE, OAuthClient, StepUpHandoff, TokenClaims, TokenResponse
+from geena.oauth import ORGANIZATION_SCOPE, OAuthClient, TokenClaims, TokenResponse
 from geena.org import OrgClient
 from geena.partner import PartnerClient
 from geena.tokens import TokenSet, ensure_fresh
@@ -44,7 +44,6 @@ __all__ = [
     "OrgClient",
     "PartnerClient",
     "ReconnectRequired",
-    "StepUpHandoff",
     "TokenClaims",
     "TokenResponse",
     "TokenSet",

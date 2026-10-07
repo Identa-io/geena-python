@@ -169,9 +169,8 @@ paths:
         alias from the subject's candidates: a family member, or a company the user manages) —
         and is granted to the slot in the same act. Always-create: a fresh resource every time,
         never colliding with or probing for existing data. Structured documents arrive as JSON
-        (schema-locked to the slot); files as multipart/form-data. Identification-document slots
-        refuse — the capture ceremony is their only create path (IDN-5). Requires the slot's
-        `fill` verb; receipted; provenance records the app.
+        (schema-locked to the slot); files as multipart/form-data. Requires the slot's `fill`
+        verb; receipted; provenance records the app.
 
         The participant may be given either as the `participant` query parameter or as a
         `participant` field in the body (a JSON property, or a multipart part); the query
@@ -560,7 +559,7 @@ components:
       name: kind
       in: path
       required: true
-      description: The slot's capability kind as published in the manifest (e.g. `id_document`, `personal_files`).
+      description: The slot's capability kind as published in the manifest (e.g. `schema`, `personal_files`).
       schema:
         type: string
     target:
@@ -588,8 +587,8 @@ components:
         one participant and someone else already answers it), `participant_not_allowed` (422 —
         a participant was named on a recipient slot, which is about the account holder),
         `subject_kind_unsupported` (409 — the act does not apply to this subject's kind).
-        Security-gate refusals (missing scope, step-up required) instead answer 403 with the
-        platform's `{"errors":[{"message","extensions"}]}` envelope.
+        Security-gate refusals (missing scope) instead answer 403 with the platform's
+        `{"errors":[{"message","extensions"}]}` envelope.
       content:
         application/json:
           schema:
@@ -633,8 +632,8 @@ components:
             $ref: "#/components/schemas/Error"
     Sealed:
       description: |
-        `sealed` — the user's L2/L3 vault is sealed; the entitlement is real but the key context
-        needs the user's own step-up. Ask the user to sign in (or drive POST /oauth/step-up).
+        `sealed` — the user's vault key could not be opened right now; the entitlement is real.
+        Retry, or ask the user to sign in.
       content:
         application/json:
           schema:
@@ -867,7 +866,6 @@ components:
       description: |
         One decrypted record. Shape depends on `type`:
         `document` — `{resourceId, type, version, name, data}`;
-        `id_document` — `{resourceId, type, documentType, name, ocr, verification, images}`;
         `file` — `{resourceId, type, version, label, fileName, mimeType, fileSize, downloadUrl}`
         (content flows only through the `downloadUrl` slot-file route, never inline).
 
@@ -1006,19 +1004,19 @@ components:
         One pickable vault resource. Document rows carry their current `data` when the user's
         key context can open them (amended 2026-08-14; the launch shape was metadata-only) —
         the serving is covered by the slot's coalesced `listed` receipt. A row whose content
-        cannot be decrypted (sealed vault, cold keys) degrades to metadata. Files and
-        ID documents are always metadata-only: their content flows exclusively through
-        grants and the serving/streaming routes.
+        cannot be decrypted (sealed vault, cold keys) degrades to metadata. Files are always
+        metadata-only: their content flows exclusively through grants and the serving/streaming
+        routes.
       properties:
         resourceId:
           type: string
           format: uuid
         type:
           type: string
-          enum: [document, id_document, file]
+          enum: [document, file]
         name:
           type: string
-          description: Document / ID-document display name.
+          description: Document display name.
         label:
           type: string
           description: File label.
@@ -1029,9 +1027,6 @@ components:
         fileSize:
           type: integer
           format: int64
-        documentType:
-          type: string
-          description: ID-document type (e.g. `Passport`).
         data:
           type: object
           additionalProperties: true

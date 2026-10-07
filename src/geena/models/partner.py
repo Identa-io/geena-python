@@ -91,8 +91,7 @@ class StatusResponse(Payload):
 class ServedRecord(Payload):
     """One granted resource as served. Read ``status`` before ``type``.
 
-    ``document`` carries ``data``; ``id_document`` carries ``document_type``, ``ocr``,
-    ``verification`` and ``images``; ``file`` carries ``label``, ``file_name``, ``mime_type``,
+    ``document`` carries ``data``; ``file`` carries ``label``, ``file_name``, ``mime_type``,
     ``file_size`` and a ``download_url`` (the bytes never arrive inline). ``participant`` is
     always present on the wire: ``None`` for the recipient's own data. A record with
     ``status == "unavailable"`` has no ``type`` and a ``reason``: ``participant_ineligible``
@@ -107,10 +106,6 @@ class ServedRecord(Payload):
     version: int | None = None
     name: str | None = None
     data: DocumentData | None = None
-    document_type: str | None = Field(default=None, alias="documentType")
-    ocr: DocumentData | None = None
-    verification: list[StatusVerification] = Field(default_factory=list)
-    images: list[DocumentData] = Field(default_factory=list)
     label: str | None = None
     file_name: str | None = Field(default=None, alias="fileName")
     mime_type: str | None = Field(default=None, alias="mimeType")
@@ -144,7 +139,6 @@ class CandidateItem(Payload):
     file_name: str | None = Field(default=None, alias="fileName")
     mime_type: str | None = Field(default=None, alias="mimeType")
     file_size: int | None = Field(default=None, alias="fileSize")
-    document_type: str | None = Field(default=None, alias="documentType")
     data: DocumentData | None = None
     version: int | None = None
     created_at: str = Field(alias="createdAt")
