@@ -63,7 +63,7 @@ class RequestItem(Payload):
     group: str | None = None
     subject: str | None = None
     multiple: bool = False
-    #: ``schema``, ``id_document``, ``personal_files``, ``entity_files``, ``custom_schema``.
+    #: ``schema``, ``personal_files``, ``entity_files``, ``custom_schema``.
     kind: str
     target: str | None = None
     verbs: list[str] = Field(default_factory=list)
@@ -90,7 +90,7 @@ class Adoption(Payload):
     source_version: int = Field(alias="sourceVersion")
     org_resource_id: str | None = Field(default=None, alias="orgResourceId")
     org_version: int | None = Field(default=None, alias="orgVersion")
-    #: ``document``, ``id_document`` or ``file``.
+    #: ``document`` or ``file``.
     resource_type: str = Field(alias="resourceType")
     #: ``materialized`` or ``pending`` (a cold key at keep time; drain retries it).
     state: str

@@ -119,12 +119,18 @@ async def test_plane_refusals_become_api_errors(client: GeenaClient, geena: Fake
         f"/partner/v1/requests/{REQ}/slots/{SLOT}",
         status=403,
         json_body={
-            "errors": [{"message": "step-up required", "extensions": {"code": "step_up_required"}}]
+            "errors": [
+                {
+                    "message": "partner token cannot access",
+                    "extensions": {"code": "insufficient_scope"},
+                }
+            ]
         },
     )
     with pytest.raises(GeenaAPIError) as gate:
         await client.partner.serve_slot("a-1", REQ, SLOT)
-    assert gate.value.code == "step_up_required" and gate.value.message == "step-up required"
+    assert gate.value.code == "insufficient_scope"
+    assert gate.value.message == "partner token cannot access"
 
 
 async def test_fill_surface_names_the_participant(client: GeenaClient, geena: FakeGeena) -> None:

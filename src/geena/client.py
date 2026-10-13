@@ -18,7 +18,7 @@ class GeenaClient:
     ``base_url`` is the API (``https://api.test.geena.eu``); ``public_base_url`` is where the
     user's browser reaches it when that differs (a container calling ``host.docker.internal``
     while the popup opens ``localhost``); ``dashboard_base_url`` is the hosted pages
-    (``https://dashboard.test.geena.eu``), used for deep links and the step-up page.
+    (``https://dashboard.test.geena.eu``), used for deep links.
 
     Use it as an async context manager, or call :meth:`aclose` when the process stops.
     """

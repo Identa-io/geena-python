@@ -1,7 +1,7 @@
 # The organization plane's contract (/org/v1). This document is the single source of truth for the
 # plane's routes: the Go registrar and server interface are generated from it (`make oapi`), and
 # cmd/identa binds the generated registrar through the engine's gated OrgRouter — so an operation
-# added here is wired with authentication, the organization's required security level and the
+# added here is wired with authentication, the partner-session requirement and the
 # `organization` scope by construction, and the published contract cannot drift from the code.
 #
 # Same load-bearing conventions as the partner plane:
@@ -27,8 +27,8 @@ info:
     person is still an active member and that their role covers the act (`request_read` for
     reads, `request_manage` for keeping copies and deciding proposals) — exactly the checks the
     dashboard runs — and serves only the organization's own material. Reading a kept copy or a
-    proposed version opens the organization's key in the member's key context; a cold key
-    answers `423 org_sealed` until the member's own step-up opens it.
+    proposed version opens the organization's key in the member's key context; a key that
+    cannot be opened answers `423 org_sealed`.
 
     Ungranted, foreign, malformed and nonexistent all read as the same `404 not_found` — the
     oracle rule: probing learns nothing.
@@ -489,8 +489,8 @@ paths:
         It corrects a copy that already exists; it never keeps. Keep the slot first (POST
         `/adopt`) — correcting a record with no materialized copy answers `403 adoption_refused`.
         Requires the slot's `keep` verb and `request_manage`. Structured records only: a kept file
-        or a captured scan answers `403 adoption_refused`, since the organization does not write
-        into a file's history.
+        answers `403 adoption_refused`, since the organization does not write into a file's
+        history.
 
         Pinned to what the member saw, and refused before anything is written when either pin is
         stale. Take all three addressing fields from the NEWEST materialized keep of the record on
@@ -728,7 +728,7 @@ components:
         `role_insufficient`, `not_found`, `unsupported_item`, `invalid_body`, `invalid_document`,
         `adoption_refused`, `participant_ineligible`, `version_conflict`, `too_large`,
         `org_sealed`, `server_error`. Security-gate refusals
-        (missing scope, step-up required) instead answer 403 with the platform's
+        (missing scope) instead answer 403 with the platform's
         `{"errors":[{"message","extensions"}]}` envelope.
       content:
         application/json:
@@ -782,8 +782,8 @@ components:
             $ref: "#/components/schemas/Error"
     OrgSealed:
       description: |
-        `org_sealed` — the organization's key is cold in this member's context: the member is a
-        Level 2/3 account whose own step-up has not run yet. Drive POST /oauth/step-up, then retry.
+        `org_sealed` — the organization's key could not be opened in this member's context
+        (for example a membership not yet activated). Retry.
       content:
         application/json:
           schema:
@@ -863,7 +863,7 @@ components:
           type: boolean
         kind:
           type: string
-          description: "`schema`, `id_document`, `personal_files`, `entity_files`, `custom_schema`."
+          description: "`schema`, `personal_files`, `entity_files`, `custom_schema`."
         target:
           type: string
         verbs:
@@ -937,7 +937,7 @@ components:
             The version the person's resource stands at right now — compare it against the
             `sourceVersion` of the copy you kept to see whether you hold the current one. Absent on
             an `unavailable` record (a version of data the recipient may no longer hand over is not
-            yours to learn) and on an identification document, which has no versions.
+            yours to learn).
         status:
           type: string
           enum: [available, unavailable]
@@ -1001,7 +1001,7 @@ components:
             this is what tells them apart and what the copy's `downloadUrl` serves.
         resourceType:
           type: string
-          description: "`document`, `id_document` or `file`."
+          description: "`document` or `file`."
         state:
           type: string
           description: "`materialized` or `pending` (a cold key at adoption time; drain retries it)."
@@ -1091,7 +1091,7 @@ components:
           type: string
         schemaRef:
           type: string
-          description: The document's schema; absent on kept files and captured scans.
+          description: The document's schema; absent on kept files.
         data:
           type: object
           additionalProperties: true

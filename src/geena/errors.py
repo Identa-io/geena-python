@@ -1,7 +1,7 @@
 """The four ways a call to Geena fails, and the stable codes the planes answer with.
 
 Geena's planes refuse with ``{"error": "<code>", "message": "..."}`` and a stable machine-readable
-code; the security gate (a missing scope, a step-up owed) answers ``403`` with the platform's
+code; the security gate (a missing scope) answers ``403`` with the platform's
 ``{"errors": [{"message", "extensions": {"code"}}]}`` envelope instead. Both surface here as
 :class:`GeenaAPIError` with the code in ``.code``. Token-endpoint refusals follow RFC 6749 and
 surface as :class:`GeenaOAuthError`.
@@ -48,7 +48,11 @@ class GeenaAPIError(GeenaError):
 
     @property
     def is_sealed(self) -> bool:
-        """A vault key is cold (``sealed`` needs the user's step-up, ``org_sealed`` a member's)."""
+        """A vault key could not be opened right now; neither code is consent withdrawn.
+
+        ``sealed``: retry, or ask the user to sign in to Geena. ``org_sealed``: the key is your
+        organization's, and it warms when a member signs in.
+        """
         return self.status == 423
 
     @property

@@ -1,4 +1,4 @@
-"""The connect ceremony and the token endpoints: authorize URL, exchange, refresh, revoke, step-up.
+"""The connect ceremony and the token endpoints: authorize URL, exchange, refresh, revoke.
 
 These endpoints are not part of the OpenAPI documents; they follow the Partner API docs
 (https://docs.test.geena.eu/partner-api/connect/). Two ceremonies share one flow:
@@ -17,9 +17,9 @@ import json
 from typing import Any
 from urllib.parse import urlencode
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict
 
-from geena.errors import GeenaAPIError, GeenaOAuthError, GeenaTransportError
+from geena.errors import GeenaOAuthError, GeenaTransportError
 from geena.http import Transport, json_object, json_or_empty
 
 #: The scope set of an organization-access ceremony: identity plus ``organization``.
@@ -41,22 +41,6 @@ class TokenResponse(BaseModel):
 
     def grants(self, scope: str) -> bool:
         return scope in self.scope.split()
-
-
-class StepUpHandoff(BaseModel):
-    """``POST /oauth/step-up``: the one-time hand-off to Geena's hosted verification page."""
-
-    model_config = ConfigDict(populate_by_name=True, extra="ignore")
-
-    handoff_id: str = Field(alias="handoffId")
-    token: str
-    required_level: int = Field(alias="requiredLevel")
-    expires_at: str = Field(alias="expiresAt")
-
-    def verify_url(self, dashboard_base_url: str) -> str:
-        """The hosted page to open for the user (a popup, like the connect ceremony)."""
-        query = urlencode({"handoff": self.handoff_id, "token": self.token})
-        return f"{dashboard_base_url.rstrip('/')}/verify/step-up?{query}"
 
 
 class TokenClaims(BaseModel):
@@ -158,18 +142,6 @@ class OAuthClient:
         )
         if response.status_code >= 500:
             raise GeenaTransportError(f"geena revoke failed ({response.status_code})")
-
-    async def step_up(self, access_token: str) -> StepUpHandoff:
-        """Mint the hand-off that lets the user unseal their vault on Geena's hosted page.
-
-        A Standard account needs no step-up: Geena answers ``400`` and this raises
-        :class:`GeenaOAuthError` — the original refusal was something else.
-        """
-        try:
-            body = await self._transport.json("POST", "/oauth/step-up", token=access_token)
-        except GeenaAPIError as exc:
-            raise GeenaOAuthError(exc.code, exc.message) from exc
-        return StepUpHandoff.model_validate(body)
 
     @staticmethod
     def decode_claims(access_token: str) -> TokenClaims:

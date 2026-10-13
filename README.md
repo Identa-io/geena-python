@@ -7,7 +7,7 @@ organization:
 
 - the **connect ceremony** (`geena.oauth`, `geena.pkce`): the authorize URL with PKCE and
   `manifest_id`, or `scope=ORGANIZATION_SCOPE` for the back-office sign-in; the code exchange;
-  refresh with rotation; revocation; the step-up hand-off;
+  refresh with rotation; revocation;
 - the **Partner API** (`/partner/v1`, `geena.partner`): connections, status, serving, filling,
   participants (relatives and companies);
 - the **Organization API** (`/org/v1`, `geena.org`): requests and records, kept copies and
@@ -21,7 +21,7 @@ The API itself is documented at https://docs.test.geena.eu/. This package follow
 
 ## Status
 
-`0.1.0.dev0`, pinned to identa **v0.36.0**. Installable from the repository until the first tag:
+`0.1.0.dev0`, pinned to identa **v0.39.0**. Installable from the repository until the first tag:
 
 ```bash
 pip install "git+https://github.com/Identa-io/geena-python@main"
@@ -39,7 +39,7 @@ geena = GeenaClient(
     "https://api.test.geena.eu",
     client_id="acme-portal",
     client_secret=SECRET,  # backend only, never in a browser
-    dashboard_base_url="https://dashboard.test.geena.eu",  # deep links + the step-up page
+    dashboard_base_url="https://dashboard.test.geena.eu",  # deep links
 )
 ```
 
@@ -110,7 +110,7 @@ live in `geena.errors`.
 openapi/            identa's partner-v1.yaml + org-v1.yaml at the pinned release, PIN.yaml
 src/geena/
   client.py         GeenaClient: credentials + one connection pool; .oauth .partner .org
-  oauth.py          authorize URL, token exchange/refresh/revoke, step-up, claims
+  oauth.py          authorize URL, token exchange/refresh/revoke, claims
   pkce.py           verifier, S256 challenge, state
   tokens.py         TokenSet + ensure_fresh
   partner.py        /partner/v1
@@ -126,7 +126,7 @@ tests/              httpx.MockTransport fakes + the OpenAPI conformance test
 ```bash
 make sync        # uv sync --all-groups
 make check       # ruff, ruff format --check, mypy --strict, pytest  (what CI runs)
-make openapi-sync IDENTA_TAG=v0.37.0   # re-vendor identa's documents; the conformance test shows what changed
+make openapi-sync IDENTA_TAG=vX.Y.Z   # re-vendor identa's documents; the conformance test shows what changed
 ```
 
 ## Versioning

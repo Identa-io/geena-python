@@ -4,7 +4,7 @@ The token is a partner access token whose consent carries the ``organization`` s
 organization-access ceremony, see :mod:`geena.oauth`). Every call re-checks that the member
 is still active and that their role covers the act: ``request_read`` to read requests,
 ``request_manage`` to keep, correct and decide, plus the file permissions to attach files.
-A cold organization key answers ``423 org_sealed`` until the member's own step-up runs.
+An organization key the member's context cannot open answers ``423 org_sealed``.
 """
 
 from __future__ import annotations
