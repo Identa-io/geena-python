@@ -8,6 +8,10 @@ These endpoints are not part of the OpenAPI documents; they follow the Partner A
 - **organization access**: ``scope=ORGANIZATION_SCOPE`` and no manifest, a pure login for the
   organization's own back office. The scope means "if member": the token response's ``scope``
   says whether the person turned out to be one, and only then does the token open ``/org/v1``.
+
+An app that signs its own tokens (:mod:`geena.app_tokens`) needs neither the exchange nor the
+client secret: it sends a member through the same ceremony once, with a connect hint
+(:meth:`OAuthClient.connect_url`), and calls both planes with its own tokens from then on.
 """
 
 from __future__ import annotations
@@ -19,11 +23,15 @@ from urllib.parse import urlencode
 
 from pydantic import BaseModel, ConfigDict
 
-from geena.errors import GeenaOAuthError, GeenaTransportError
+from geena.errors import GeenaError, GeenaOAuthError, GeenaTransportError
 from geena.http import Transport, json_object, json_or_empty
 
 #: The scope set of an organization-access ceremony: identity plus ``organization``.
 ORGANIZATION_SCOPE = "profile offline_access organization"
+
+#: The scope set of a staff connect: an app that signs its own tokens exchanges no code, so it
+#: asks for no refresh token.
+CONNECT_SCOPE = "profile organization"
 
 
 class TokenResponse(BaseModel):
@@ -65,12 +73,12 @@ class OAuthClient:
         transport: Transport,
         *,
         client_id: str,
-        client_secret: str,
+        client_secret: str | None = None,
         public_base_url: str | None = None,
     ) -> None:
         self._transport = transport
         self._client_id = client_id
-        self._client_secret = client_secret
+        self._client_secret = client_secret or None
         self._public_base = (public_base_url or transport.base_url).rstrip("/")
 
     @property
@@ -86,16 +94,20 @@ class OAuthClient:
         manifest_id: str | None = None,
         request_id: str | None = None,
         scope: str | None = None,
+        app_token: str | None = None,
     ) -> str:
         """The URL to open in the popup (synchronously, in the click handler).
 
         ``redirect_uri`` must sit on one of the app's registered origins (scheme + host + port,
         matched exactly). Pass ``manifest_id`` for a data connection, ``request_id`` to resume an
         invitation your organization sent, or ``scope=ORGANIZATION_SCOPE`` with neither for the
-        back-office sign-in.
+        back-office sign-in. ``app_token`` is a connect hint (see :meth:`connect_url`).
         """
-        if scope and "organization" in scope.split() and (manifest_id or request_id):
+        organization = bool(scope) and "organization" in (scope or "").split()
+        if organization and (manifest_id or request_id):
             raise ValueError("organization access is a pure login: no manifest_id or request_id")
+        if app_token and not organization:
+            raise ValueError("a connect hint rides only on an organization-access sign-in")
         params = {
             "response_type": "code",
             "client_id": self._client_id,
@@ -110,7 +122,29 @@ class OAuthClient:
             params["request_id"] = request_id
         if scope:
             params["scope"] = scope
+        if app_token:
+            params["app_token"] = app_token
         return f"{self._public_base}/oauth/authorize?{urlencode(params)}"
+
+    def connect_url(
+        self, *, redirect_uri: str, state: str, code_challenge: str, connect_hint: str
+    ) -> str:
+        """Connect a member's account at your app to their Geena account, once.
+
+        ``connect_hint`` is :meth:`AppTokenSigner.connect_hint` for the member, signed for this
+        client. They sign in to Geena, accept the organization-access screen, and from then on
+        your app's tokens for their ``sub`` reach Geena as them. The redirect carries a code as
+        usual; there is nothing to exchange. Geena refuses the connect before showing anything
+        when they are not a member of your organization, when either account is already
+        connected to another, or when the hint is expired, of another kind, or already used.
+        """
+        return self.authorize_url(
+            redirect_uri=redirect_uri,
+            state=state,
+            code_challenge=code_challenge,
+            scope=CONNECT_SCOPE,
+            app_token=connect_hint,
+        )
 
     async def exchange_code(
         self, *, code: str, code_verifier: str, redirect_uri: str
@@ -138,7 +172,7 @@ class OAuthClient:
         """RFC 7009: present any refresh token and the whole grant is torn down."""
         response = await self._transport.form(
             "/oauth/revoke",
-            {"client_id": self._client_id, "client_secret": self._client_secret, "token": token},
+            {"client_id": self._client_id, "client_secret": self._secret(), "token": token},
         )
         if response.status_code >= 500:
             raise GeenaTransportError(f"geena revoke failed ({response.status_code})")
@@ -156,10 +190,18 @@ class OAuthClient:
             raise GeenaTransportError("access token payload is not an object")
         return TokenClaims.model_validate(data)
 
+    def _secret(self) -> str:
+        if self._client_secret is None:
+            raise GeenaError(
+                "this client has no client secret: an app that signs its own tokens "
+                "exchanges no code and refreshes nothing"
+            )
+        return self._client_secret
+
     async def _token(self, form: dict[str, str]) -> TokenResponse:
         response = await self._transport.form(
             "/oauth/token",
-            {"client_id": self._client_id, "client_secret": self._client_secret, **form},
+            {"client_id": self._client_id, "client_secret": self._secret(), **form},
         )
         if response.status_code == 200:
             return TokenResponse.model_validate(json_object(response))

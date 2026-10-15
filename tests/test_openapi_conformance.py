@@ -49,6 +49,15 @@ def _schemas(name: str) -> dict[str, Any]:
     return schemas
 
 
+def _properties(schema: dict[str, Any], schemas: dict[str, Any]) -> set[str]:
+    """A schema's properties, with an ``allOf`` composition's parts merged in."""
+    names = set(schema.get("properties") or {})
+    for part in schema.get("allOf") or []:
+        ref = part.get("$ref")
+        names |= _properties(schemas[ref.rsplit("/", 1)[-1]] if ref else part, schemas)
+    return names
+
+
 def _wire_names(model: type[Any]) -> set[str]:
     return {field.alias or name for name, field in model.model_fields.items()}
 
@@ -58,10 +67,11 @@ def test_every_response_schema_has_a_model_with_the_same_wire_names(
     plane: str, module: ModuleType
 ) -> None:
     mismatches: list[str] = []
-    for name, schema in _schemas(plane).items():
+    schemas = _schemas(plane)
+    for name, schema in schemas.items():
         if name in REQUEST_SCHEMAS[plane] or name in OPEN_SCHEMAS[plane]:
             continue
-        properties = schema.get("properties")
+        properties = _properties(schema, schemas)
         if not properties:
             continue  # enums and other primitives
         model = getattr(module, RENAMED[plane].get(name, name), None)

@@ -18,7 +18,10 @@ class GeenaClient:
     ``base_url`` is the API (``https://api.test.geena.eu``); ``public_base_url`` is where the
     user's browser reaches it when that differs (a container calling ``host.docker.internal``
     while the popup opens ``localhost``); ``dashboard_base_url`` is the hosted pages
-    (``https://dashboard.test.geena.eu``), used for deep links.
+    (``https://dashboard.test.geena.eu``), used for deep links and claim pages.
+
+    ``client_secret`` is for the code exchange, refresh and revoke only: an app that signs its
+    own tokens (:mod:`geena.app_tokens`) leaves it out.
 
     Use it as an async context manager, or call :meth:`aclose` when the process stops.
     """
@@ -28,7 +31,7 @@ class GeenaClient:
         base_url: str,
         *,
         client_id: str,
-        client_secret: str,
+        client_secret: str | None = None,
         public_base_url: str | None = None,
         dashboard_base_url: str | None = None,
         timeout: float = 30.0,
@@ -54,6 +57,17 @@ class GeenaClient:
         if not self.dashboard_base_url:
             return None
         return f"{self.dashboard_base_url}/personal/connections/{request_id}"
+
+    def claim_url(self, claim_link: str) -> str:
+        """Geena's claim page for a person your organization imported: send their browser here.
+
+        ``claim_link`` is :meth:`AppTokenSigner.claim_link` for the person. Geena shows what your
+        organization keeps and mails a code to the email you imported them with; the account
+        becomes theirs, or what you hold joins the Geena account they already have.
+        """
+        if not self.dashboard_base_url:
+            raise ValueError("dashboard_base_url is not configured: the claim page lives there")
+        return f"{self.dashboard_base_url}/claim/{claim_link}"
 
     async def aclose(self) -> None:
         await self.transport.aclose()

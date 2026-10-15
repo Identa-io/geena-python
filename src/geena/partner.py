@@ -1,8 +1,16 @@
 """``/partner/v1``: what a user granted your app, addressed by the connection's ``request_id``.
 
-Every method takes the user's access token: tokens are the integrator's to store and refresh
+Every method takes the user's token: an app token your app signed for them
+(:mod:`geena.app_tokens`), or an OAuth access token the integrator stores and refreshes
 (:mod:`geena.tokens`). Every act is receipted to the user with your app's client id; reads
 included. What was not granted answers ``404 not_found`` — the oracle rule.
+
+A person your organization imported holds a **held account** until they claim it: the same
+routes serve them what your organization holds about them. ``status`` and ``serve_slot`` read
+it, ``write_slot`` corrects it (``202``, pending until a member accepts), and every other route
+answers ``403 account_held``. A **contact** on a request (not its owner) is served the same way,
+held or claimed, and answers ``403 contact_corrections_only`` elsewhere. Call the same routes
+either way: Geena, not your app, knows who has claimed.
 """
 
 from __future__ import annotations
@@ -71,12 +79,20 @@ class PartnerClient:
         data: DocumentData,
         *,
         name: str | None = None,
+        resource_id: str | None = None,
     ) -> WriteResponse:
         """A new version of the slot's one granted document (``edit`` verb). ``data`` replaces
-        the document wholesale: read, merge, write — never a patch."""
+        the document wholesale: read, merge, write — never a patch.
+
+        For a held account or a contact the write is a correction of the organization's copy,
+        answered ``202`` with ``acceptance == "pending"``; on a slot holding several records,
+        ``resource_id`` names the one to correct (a record ``serve_slot`` returned).
+        """
         payload: JSONObject = {"data": data}
         if name:
             payload["name"] = name
+        if resource_id:
+            payload["resourceId"] = resource_id
         return WriteResponse.model_validate(
             await self._t.json(
                 "PUT",

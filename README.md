@@ -5,15 +5,20 @@ The Python client for Geena's partner integration surface — the `geena` packag
 A partner's backend uses it to hold a **connection** with a Geena user and to act for its own
 organization:
 
+- **app tokens** (`geena.app_tokens`): an app that signs its own users in signs a short-lived
+  token for each of them — data tokens for both planes, connect hints for its staff, claim links
+  for the people it imported. No client secret, no code exchange, no refresh;
 - the **connect ceremony** (`geena.oauth`, `geena.pkce`): the authorize URL with PKCE and
-  `manifest_id`, or `scope=ORGANIZATION_SCOPE` for the back-office sign-in; the code exchange;
-  refresh with rotation; revocation;
+  `manifest_id`, `scope=ORGANIZATION_SCOPE` for the back-office sign-in, or `connect_url()` to
+  connect a staff member with a connect hint; the code exchange; refresh with rotation;
+  revocation;
 - the **Partner API** (`/partner/v1`, `geena.partner`): connections, status, serving, filling,
-  participants (relatives and companies);
-- the **Organization API** (`/org/v1`, `geena.org`): requests and records, kept copies and
-  corrections, request files, update proposals;
-- **token custody** (`geena.tokens`): a `TokenSet` per connection and `ensure_fresh()`; where
-  tokens are stored and who holds the lock while they rotate stays the integrator's decision.
+  participants (relatives and companies), corrections by held accounts and contacts;
+- the **Organization API** (`/org/v1`, `geena.org`): imports, the manifest, requests and
+  records, kept copies and corrections, pending versions, request files;
+- **token custody** (`geena.tokens`): a `TokenSet` per OAuth connection and `ensure_fresh()`;
+  where tokens are stored and who holds the lock while they rotate stays the integrator's
+  decision.
 
 The API itself is documented at https://docs.test.geena.eu/. This package follows that contract:
 `openapi/` holds identa's two OpenAPI documents at the release the package was built against
@@ -21,15 +26,97 @@ The API itself is documented at https://docs.test.geena.eu/. This package follow
 
 ## Status
 
-`0.1.0.dev0`, pinned to identa **v0.39.0**. Installable from the repository until the first tag:
+`0.2.0.dev0`, pinned to identa **v0.40.0**. Installable from the repository until the first tag:
 
 ```bash
 pip install "git+https://github.com/Identa-io/geena-python@main"
 ```
 
-Python 3.11 or newer; depends on `httpx` and `pydantic` v2 only.
+Python 3.11 or newer; depends on `httpx`, `pydantic` v2 and `PyJWT` (with `cryptography`, for
+app tokens).
 
-## Quickstart
+## Quickstart: an app that signs its own tokens
+
+Your app already signs its users in. Register one key pair on your apps in Geena (Organization
+→ Apps → *This app signs its own tokens*: issuer, public key, `ES256`), keep the private key on
+your backend, and sign a token per person:
+
+```python
+from geena import AppTokenSigner, GeenaClient
+from geena.models.org import ImportPerson, ImportRequest, ImportValue
+from geena.pkce import challenge_for, new_state, new_verifier
+
+geena = GeenaClient(
+    "https://api.test.geena.eu",
+    client_id="dff-staff",  # no client secret: nothing is exchanged or refreshed
+    dashboard_base_url="https://dashboard.test.geena.eu",  # claim pages
+)
+signer = AppTokenSigner(
+    issuer="https://flow.example.com",  # the iss registered on your apps
+    private_key=GEENA_SIGNING_KEY,  # PEM; a literal "\n" from an environment variable is fine
+    audience="https://api.test.geena.eu",
+)
+```
+
+**Call as the person** — one token per signed-in user, at most ten minutes, reusable until
+`expires_at`. Hand it to the page or call from your backend; never mint one while someone
+impersonates the user:
+
+```python
+token = signer.data_token("dff-staff", staff_user.id)
+requests = await geena.org.list_requests(token.token)
+```
+
+**Connect a staff member, once** — they must already be a member of your organization in Geena
+(and have signed in there once, or `/org/v1` answers `423 org_sealed`):
+
+```python
+url = geena.oauth.connect_url(
+    redirect_uri="https://flow.example.com/geena/connected",
+    state=new_state(),
+    code_challenge=challenge_for(new_verifier()),  # the code that comes back is not exchanged
+    connect_hint=signer.connect_hint("dff-staff", staff_user.id).token,
+)
+```
+
+**Import an investor you already serve** (`request_manage`) — slot ids come from the manifest,
+never hard-coded; a re-run adds what is new and never overwrites:
+
+```python
+manifest = await geena.org.manifest(token.token, MANIFEST_ID)
+result = await geena.org.import_investor(
+    token.token,
+    ImportRequest(
+        client_id="dff-client",  # the app whose users the people are
+        manifest_id=MANIFEST_ID,
+        external_ref=investor.id,
+        kind="individual",
+        people=[ImportPerson(sub=contact.id, email=contact.email, role="owner")],
+        values=[
+            ImportValue(
+                slot_id=manifest.slot("PersonFullName").slot_id,
+                data={"firstName": "Henrik", "lastName": "van den Berg"},
+            )
+        ],
+    ),
+)
+```
+
+**Let the investor claim** their account — Geena mails them a code:
+
+```python
+claim = geena.claim_url(signer.claim_link("dff-client", contact.id).token)  # send them here
+```
+
+**Decide what is pending** — a held investor's or a contact's correction, or an update on a
+manual slot:
+
+```python
+for version in (await geena.org.pending(token.token, request_id)).pending:
+    await geena.org.accept_pending(token.token, request_id, version.resource_id, version.version)
+```
+
+## Quickstart: the OAuth connect ceremony
 
 ```python
 from geena import GeenaClient, ORGANIZATION_SCOPE, TokenSet, ensure_fresh
@@ -99,7 +186,8 @@ if tokens.grants("organization"):
 ```
 
 **Errors.** Every refusal is typed: `GeenaAPIError` carries the plane's `status` and stable
-`code` (`not_found`, `slot_conflict`, `participant_ineligible`, `org_sealed`, ...),
+`code` (`not_found`, `slot_conflict`, `participant_ineligible`, `org_sealed`, `account_held`,
+`import_refused`, ...), with `is_unauthorized` for a refused token (sign a new one),
 `GeenaOAuthError` the RFC 6749 code, `GeenaTransportError` an unreachable or off-contract
 server, and `ReconnectRequired` says the stored tokens cannot be refreshed. The code constants
 live in `geena.errors`.
@@ -109,8 +197,9 @@ live in `geena.errors`.
 ```
 openapi/            identa's partner-v1.yaml + org-v1.yaml at the pinned release, PIN.yaml
 src/geena/
-  client.py         GeenaClient: credentials + one connection pool; .oauth .partner .org
-  oauth.py          authorize URL, token exchange/refresh/revoke, claims
+  client.py         GeenaClient: credentials + one connection pool; .oauth .partner .org, claim_url
+  app_tokens.py     AppTokenSigner: data tokens, connect hints, claim links
+  oauth.py          authorize URL, connect URL, token exchange/refresh/revoke, claims
   pkce.py           verifier, S256 challenge, state
   tokens.py         TokenSet + ensure_fresh
   partner.py        /partner/v1

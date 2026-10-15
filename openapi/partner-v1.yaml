@@ -30,6 +30,18 @@ info:
     the user's TOOK ledger with the app's client id. Ungranted, foreign, malformed and nonexistent
     all read as the same `404 not_found` — the oracle rule: probing learns nothing.
 
+    **Held accounts.** A person your organization imported (`POST /org/v1/imports`) holds a held
+    account until they claim it: no vault of their own, so nothing to grant from. The same routes
+    serve them what your organization holds about them — `/status` (a slot is `granted` when a
+    copy is held) and `GET /slots/{slotId}` (each copy's newest accepted version, with the party
+    it is about) — and `PUT /slots/{slotId}` sends their correction, which your organization
+    accepts or rejects (`202`, pending; `/org/v1/requests/{requestId}/pending`). No receipt is
+    written: nothing of a vault of theirs is read. Every other route answers `403 account_held`.
+    A **contact** on a request is served the same way, held or claimed — they correct what your
+    organization holds and answer for nobody's data (`403 contact_corrections_only` elsewhere);
+    only the request's own claimed owner is served from their vaults.
+    Whether the person has claimed is decided here: an app calls the same routes either way.
+
 servers:
   - url: /partner/v1
 
@@ -43,9 +55,8 @@ paths:
       summary: List this app's active connections with the token's user
       description: |
         Connection discovery: every active request this app's owning organization holds with the
-        token's user, so a client can find its request ids without out-of-band state — the
-        assertion-tier path, and recovery for code-ceremony clients (the code exchange also
-        returns `request_id`). Metadata only, all of it org-authored (the org created these
+        token's user, so a client can find its request ids without out-of-band state — after a
+        refresh, or as recovery (the code exchange also returns `request_id`). Metadata only, all of it org-authored (the org created these
         requests): nothing from the vault is read, so the call is unreceipted. Pending
         invitations are not listed — a request appears once the user has consented.
       responses:
@@ -132,8 +143,13 @@ paths:
 
         The stored version is then announced to every connection holding a grant on that record,
         INCLUDING the one you wrote through: the organization's retained copy is a separate thing
-        from the source you just changed, so this request gets an update proposal, or an automatic
-        keep, under the adoption policy its accepted manifest set for the item.
+        from the source you just changed, so this request gets a pending version for review, or an
+        automatic keep, under the adoption policy its accepted manifest set for the item.
+
+        For a held account (see the overview) the write is a correction of the organization's
+        copy: its next version, pending until a member accepts it, answered `202`. A slot holding
+        several records needs `resourceId` — one of the records `GET` returned. A person's newer
+        correction replaces their own older one still pending, never another person's.
       requestBody:
         required: true
         content:
@@ -143,6 +159,12 @@ paths:
       responses:
         "200":
           description: The new version that was stored.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/WriteResponse"
+        "202":
+          description: A held account's correction, pending the organization's decision.
           content:
             application/json:
               schema:
@@ -387,11 +409,10 @@ paths:
         plane and never served back (the user renames it first-party).
 
         `company` — a legal-entity shared vault founded by the user, exactly as `sharedVaultCreate`
-        founds one first-party: the user is its owner with a live Manager key, so the company
+        founds one first-party: the user is its owner (a shared vault is its owner's alone), so the company
         appears among this subject's candidates at once and its records may answer the subject's
         slots. Registration details are not taken here; they are filled into the subject's slots
-        like any other record. Collaborators, the UBO structure and Creditsafe enrichment stay
-        first-party. A deployment without the founding handler answers `409
+        like any other record. Creditsafe enrichment stays first-party. A deployment without the founding handler answers `409
         subject_kind_unsupported`.
 
         No TOOK row is written in either lane (nothing was taken — the vault is the user's own
@@ -468,6 +489,12 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/WriteResponse"
+        "202":
+          description: A held account's correction, pending the organization's decision.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/WriteResponse"
         "400":
           $ref: "#/components/responses/BadRequest"
         "404":
@@ -501,9 +528,15 @@ components:
       scheme: bearer
       bearerFormat: JWT
       description: |
-        A partner access token from POST /oauth/token (RFC 7523 assertion or refresh grant),
+        A partner access token from POST /oauth/token (authorization-code or refresh grant),
         carrying `token_use=partner`, the client id and the `profile` scope, bound to one user's
         partner session. First-party tokens are refused on this plane.
+
+        Or an app token: a JWT an app that registered a signing key signed itself — `iss` its
+        registered issuer, `aud` the platform audience, `azp` its client id, `sub` its own id for
+        the user, `iat` and `exp` at most ten minutes apart. The user is the account that `sub`
+        is connected to for this app, and the account's authorization of the app must be live.
+        A connect hint (`token_use: "connect"`) is refused here.
 
   parameters:
     # x-go-type string on the id params: binding must be pass-through so the handlers keep
@@ -679,6 +712,9 @@ components:
         state:
           type: string
           description: Effective state, evaluated now. Always `active` — inactive connections are not listed.
+        externalRef:
+          type: string
+          description: Your organization's own id for what the connection is about, on a request it imported.
 
     StatusResponse:
       type: object
@@ -1089,6 +1125,10 @@ components:
         name:
           type: string
           description: Optional new display name.
+        resourceId:
+          type: string
+          format: uuid
+          description: A held account's correction only — the record to correct when the slot holds several.
 
     WriteResponse:
       type: object
@@ -1106,6 +1146,9 @@ components:
           format: uuid
         version:
           type: integer
+        acceptance:
+          type: string
+          description: "`pending` on a held account's correction; absent on an ordinary write."
 
     CreateDocumentRequest:
       type: object

@@ -5,7 +5,7 @@ from urllib.parse import parse_qs
 
 import pytest
 
-from geena import GeenaAPIError, GeenaClient, Upload
+from geena import GeenaAPIError, GeenaClient, Upload, errors
 from tests.conftest import FakeGeena
 
 REQ = "6f9b2c9e-6a4e-4a44-9d5e-2f0f6f2a9b11"
@@ -222,3 +222,58 @@ async def test_download_streams_and_relays_headers(client: GeenaClient, geena: F
     with pytest.raises(GeenaAPIError) as info:
         await client.partner.download_file("a-1", REQ, SLOT, "gone")
     assert info.value.is_not_found
+
+
+async def test_a_held_accounts_correction_is_pending(client: GeenaClient, geena: FakeGeena) -> None:
+    geena.on(
+        "GET",
+        "/partner/v1/requests",
+        json_body={
+            "requests": [
+                {
+                    "requestId": REQ,
+                    "manifestId": "m-1",
+                    "manifestVersion": 2,
+                    "state": "active",
+                    "externalRef": "investor-118",
+                }
+            ]
+        },
+    )
+    listing = await client.partner.list_connections("app-token")
+    assert listing.requests[0].external_ref == "investor-118"
+
+    geena.on(
+        "PUT",
+        f"/partner/v1/requests/{REQ}/slots/{SLOT}",
+        status=202,
+        json_body={
+            "slotId": SLOT,
+            "kind": "schema",
+            "resourceId": "copy-1",
+            "version": 3,
+            "acceptance": "pending",
+        },
+    )
+    written = await client.partner.write_slot(
+        "app-token", REQ, SLOT, {"phoneNumber": "+31 6 1234 5678"}, resource_id="copy-1"
+    )
+    assert written.pending and written.version == 3
+    assert geena.last_json() == {"data": {"phoneNumber": "+31 6 1234 5678"}, "resourceId": "copy-1"}
+
+    geena.on(
+        "GET",
+        f"/partner/v1/requests/{REQ}/slots/{SLOT}/candidates",
+        status=403,
+        json_body={"error": "account_held", "message": "a held account reads and corrects only"},
+    )
+    with pytest.raises(GeenaAPIError) as held:
+        await client.partner.candidates("app-token", REQ, SLOT)
+    assert held.value.code == errors.ACCOUNT_HELD
+
+
+async def test_a_refused_app_token_is_a_401(client: GeenaClient, geena: FakeGeena) -> None:
+    geena.on("GET", f"/partner/v1/requests/{REQ}/status", status=401, json_body={})
+    with pytest.raises(GeenaAPIError) as refused:
+        await client.partner.status("expired-app-token", REQ)
+    assert refused.value.is_unauthorized

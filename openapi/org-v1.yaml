@@ -18,16 +18,16 @@ info:
   description: |
     The organization plane: an organization's own systems reach what the organization already
     holds — its connections (the requests people accepted), the copies it kept, the files it holds
-    for a request (kept copies and the files it attached itself), and the update proposals
-    addressed to it — through a member-bound partner token instead of a dashboard session.
+    for a request (kept copies and the files it attached itself), and the versions of those copies
+    waiting for its decision — through a member-bound partner token instead of a dashboard session.
 
     The token is a partner access token whose consent carries the `organization` scope: the
     person behind it signed in on the hosted ceremony and consented to the app acting under
     their membership of the app's owning organization. Every call re-checks, live, that the
     person is still an active member and that their role covers the act (`request_read` for
-    reads, `request_manage` for keeping copies and deciding proposals) — exactly the checks the
-    dashboard runs — and serves only the organization's own material. Reading a kept copy or a
-    proposed version opens the organization's key in the member's key context; a key that
+    reads, `request_manage` for keeping copies and deciding on pending versions) — exactly the
+    checks the dashboard runs — and serves only the organization's own material. Reading a kept
+    copy or a pending version opens the request vault's key in the member's key context; a key that
     cannot be opened answers `423 org_sealed`.
 
     Ungranted, foreign, malformed and nonexistent all read as the same `404 not_found` — the
@@ -67,18 +67,91 @@ paths:
         default:
           $ref: "#/components/responses/Error"
 
+  /manifests/{manifestId}:
+    parameters:
+      - $ref: "#/components/parameters/manifestId"
+    get:
+      operationId: getManifest
+      summary: Read one of the organization's manifests
+      description: |
+        The newest published version of one of the organization's manifests: its slots (what each
+        asks, about whom, how many, with which verbs) and the subjects it asks about. What an
+        import maps its values onto (`/imports` names each value's `slotId`). Requires
+        `request_read`; a manifest of another organization, or one never published, is `404`.
+      responses:
+        "200":
+          description: The manifest's newest published version.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Manifest"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        default:
+          $ref: "#/components/responses/Error"
+
+  /imports:
+    post:
+      operationId: importInvestor
+      summary: Import one investor the organization already serves
+      description: |
+        Brings one investor — a person, or a company with its contacts — into Geena with what the
+        organization already holds about them, in one transaction. Requires `request_manage`.
+
+        - **People** are found by your app's own id for them (`sub`, through the app named by
+          `clientId` — an app of this organization that signs its own tokens), or created as
+          **held accounts**: a Geena account the organization holds for the person until they
+          claim it. A held account has no vault of its own and cannot sign in; the person reaches
+          it through your app's own tokens, which the import authorizes. A person who already
+          claimed their account is invited instead, and answers the request themselves.
+        - **The request** is found by your own id for the investor (`externalRef`), or created:
+          active, with every held person on it as an accepted recipient — the import is the
+          organization's act, and the person is asked nothing until they claim.
+        - **Every non-empty value** becomes version 1 of a copy the organization keeps, tagged
+          `imported`. A value for a slot about the recipient names whose record it is with
+          `person` (a `sub`; omitted: the owner's); a value for a slot about a manifest subject
+          (the company) names which party with `ref` (omitted for a subject asked about once).
+
+        Nothing reaches anyone's own vault and no mail is sent. A second import with the same
+        `externalRef` skips what exists — the request, the people on it, every slot and party
+        that already holds a copy — and adds what is new: an import never overwrites a copy (correct
+        it instead). Structured records only; a file slot is refused.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/ImportRequest"
+      responses:
+        "200":
+          description: What the import did.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ImportResult"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "409":
+          $ref: "#/components/responses/Conflict"
+        "423":
+          $ref: "#/components/responses/OrgSealed"
+        default:
+          $ref: "#/components/responses/Error"
+
   /requests/{requestId}:
     parameters:
       - $ref: "#/components/parameters/requestId"
     get:
       operationId: getRequest
-      summary: One request, with its items, kept copies and open proposals
+      summary: One request, with its items, kept copies and pending versions
       description: |
         The request, the manifest version it pinned, and — per slot — whether the person granted
         it (`granted` / `pending`) plus one `records` entry per standing answer, the adoptions
-        (copies the organization kept, materialized or still pending a cold key) and the open
-        update proposals. One call renders an organization's view of a connection; the copies'
-        values are read separately.
+        (copies the organization kept, materialized or still pending a cold key) and the versions
+        of those copies waiting for a decision. One call renders an organization's view of a
+        connection; the copies' values, and the pending versions', are read separately.
 
         `records` is where a slot answered by several parties becomes legible: each entry names
         its `participant`, carries the version that party's source stands at, and says whether it
@@ -157,8 +230,8 @@ paths:
         an attachment (`Content-Disposition`, the file's own `Content-Type` and `Content-Length`).
         Addressed by the adoption — the organization's record of having kept it — never by a raw
         file id: the plane re-proves that the request is this organization's, that the adoption
-        belongs to it, is materialized and is a file, and that the copy lives in the
-        organization's own vault. Requires `request_manage`, the same floor as reading a copy's
+        belongs to it, is materialized and is a file, and that the copy lives in a vault the
+        organization owns (the request's own). Requires `request_manage`, the same floor as reading a copy's
         values. A document adoption answers `400 unsupported_item`; a copy still pending a cold
         key answers `403 adoption_refused`.
 
@@ -215,7 +288,7 @@ paths:
       description: |
         The organization's OWN file — a signed agreement, a letter, a scan of its own — stored in
         the organization's vault, tagged as the organization's own and naming this request. The
-        person never sees it, and no adoption row, receipt or proposal is written, because nothing
+        person is not shown it, and no adoption row or receipt is written, because nothing
         of theirs was taken. Requires `request_manage` and `file_create`.
 
         It works on every request the organization holds, in any state, whatever its manifest asks
@@ -247,6 +320,8 @@ paths:
           $ref: "#/components/responses/TooLarge"
         "423":
           $ref: "#/components/responses/OrgSealed"
+        "507":
+          $ref: "#/components/responses/QuotaExceeded"
         default:
           $ref: "#/components/responses/Error"
 
@@ -291,6 +366,8 @@ paths:
           $ref: "#/components/responses/TooLarge"
         "423":
           $ref: "#/components/responses/OrgSealed"
+        "507":
+          $ref: "#/components/responses/QuotaExceeded"
         default:
           $ref: "#/components/responses/Error"
     patch:
@@ -380,7 +457,7 @@ paths:
         and `Content-Length`). Requires `request_manage`, the same floor as the listing.
 
         The route re-proves the whole chain before a byte moves: the request is this
-        organization's, and the file lives in the organization's own vault carrying THIS request —
+        organization's, and the file lives in the request's own vault carrying THIS request —
         so another request's file under the same organization reads as `404 not_found`, exactly
         like an unknown id. `version` pins one version; absent means the head, and a version this
         file does not have is the same 404.
@@ -483,11 +560,14 @@ paths:
         The organization's own revision of a copy it keeps — an address in the format the
         organization wants, a name cased its way — appended as the next version of that copy's
         chain, tagged `correction`, and held beside what the person gave. It NEVER changes the
-        person's data and never reaches them: data the organization believes WRONG rather than
-        badly shaped is the person's to fix, through the partner plane's `edit` verb.
+        person's data — they see it among what the organization holds about them, and it is never
+        written into their vault. Data the organization believes WRONG rather than badly shaped is
+        the person's to fix, through the partner plane's `edit` verb.
 
         It corrects a copy that already exists; it never keeps. Keep the slot first (POST
         `/adopt`) — correcting a record with no materialized copy answers `403 adoption_refused`.
+        A record you imported (`/imports`) is its own source and needs no grant: name it by the
+        `sourceResourceId` its copy carries.
         Requires the slot's `keep` verb and `request_manage`. Structured records only: a kept file
         answers `403 adoption_refused`, since the organization does not write into a file's
         history.
@@ -553,57 +633,30 @@ paths:
         default:
           $ref: "#/components/responses/Error"
 
-  /requests/{requestId}/proposals:
+  /requests/{requestId}/pending:
     parameters:
       - $ref: "#/components/parameters/requestId"
     get:
-      operationId: listProposals
-      summary: The open update proposals on this request
+      operationId: listPendingVersions
+      summary: The versions waiting for a decision on this request
       description: |
-        "The source of something you hold has a newer version" notices, one per granted resource
-        at most, superseded in place by later edits. Address a decision by the notice's own
-        `proposalId`. A proposal carries no diff — comparing against the copy already kept is the
-        reader's own work.
+        Every pending version of a copy the organization keeps: the person's newer version of a
+        record under a MANUAL slot, written into the request's vault when they saved it and
+        waiting for a member to accept or reject it. Each carries its values (`proposed`) and the
+        copy's head now (`current`, absent when the copy has no accepted version yet), so the two
+        compare side by side. The values are the organization's own copy: reading them reads nothing
+        of the person's live vault and writes no receipt. Requires `request_manage`.
 
-        The editor is not always the recipient. A notice about a company's record is raised by
-        whoever edited it inside that company — any collaborator with write access — and reaches
-        this request because the recipient may still answer for that company. `participant` names
-        the party; it never names the person who typed.
-
-        Notices are not a complete audit of the source. An edit made while the recipient could not
-        answer for that party (they had lost the Manager role, say) raises none, and regaining the
-        role does not replay it: the live reads — this request's `records` and the serving plane —
-        show the current version, but no notice appears for the edit that was missed.
+        The editor is not always the recipient. A version of a company's record is written by
+        whoever edited it inside that company; `participant` names the party, never the person who
+        typed. A newer save supersedes the version still pending, so one record waits once.
       responses:
         "200":
-          description: The open proposals.
+          description: The pending versions, oldest first.
           content:
             application/json:
               schema:
-                $ref: "#/components/schemas/ProposalsResponse"
-        "404":
-          $ref: "#/components/responses/NotFound"
-        default:
-          $ref: "#/components/responses/Error"
-
-  /requests/{requestId}/proposals/{proposalId}/candidate:
-    parameters:
-      - $ref: "#/components/parameters/requestId"
-      - $ref: "#/components/parameters/proposalId"
-    get:
-      operationId: getProposalCandidate
-      summary: The proposed version's values
-      description: |
-        The content of the version the person produced, read from their vault in the member's
-        key context. Looking is taking: this writes a READ receipt on the person's side. Requires
-        `request_manage`.
-      responses:
-        "200":
-          description: The proposed version.
-          content:
-            application/json:
-              schema:
-                $ref: "#/components/schemas/ProposalCandidateResponse"
+                $ref: "#/components/schemas/PendingVersionsResponse"
         "404":
           $ref: "#/components/responses/NotFound"
         "423":
@@ -611,50 +664,55 @@ paths:
         default:
           $ref: "#/components/responses/Error"
 
-  /requests/{requestId}/proposals/{proposalId}/adopt:
+  /requests/{requestId}/pending/{resourceId}/{version}/accept:
     parameters:
       - $ref: "#/components/parameters/requestId"
-      - $ref: "#/components/parameters/proposalId"
+      - $ref: "#/components/parameters/resourceId"
+      - $ref: "#/components/parameters/version"
     post:
-      operationId: adoptProposal
-      summary: Accept the proposed version
+      operationId: acceptPendingVersion
+      summary: Accept a pending version
       description: |
-        Keeps the proposed version as the organization's copy and closes the proposal. A notice is
-        about ONE granted resource, so this keeps one copy — on a slot answered by several
-        resources the other notices are decided on their own. Requires `request_manage`.
+        Makes the version the copy's head as a whole and records the keep it answers — the
+        adoption returned here, and a receipt on the person's side. The version must be this
+        request's and still pending (`409 not_pending` otherwise). Requires `request_manage` and
+        `keep` in the accepted manifest.
       responses:
         "200":
-          description: The adoption produced.
+          description: The adoption the acceptance recorded.
           content:
             application/json:
               schema:
                 $ref: "#/components/schemas/Adoption"
         "404":
           $ref: "#/components/responses/NotFound"
-        "423":
-          $ref: "#/components/responses/OrgSealed"
+        "409":
+          $ref: "#/components/responses/Conflict"
         default:
           $ref: "#/components/responses/Error"
 
-  /requests/{requestId}/proposals/{proposalId}/dismiss:
+  /requests/{requestId}/pending/{resourceId}/{version}/reject:
     parameters:
       - $ref: "#/components/parameters/requestId"
-      - $ref: "#/components/parameters/proposalId"
+      - $ref: "#/components/parameters/resourceId"
+      - $ref: "#/components/parameters/version"
     post:
-      operationId: dismissProposal
-      summary: Dismiss the proposed version
+      operationId: rejectPendingVersion
+      summary: Reject a pending version
       description: |
-        Closes the proposal without keeping the version; the organization's copy stays as it was.
-        A later edit opens a fresh proposal. Requires `request_manage`.
+        Marks the version rejected: it stays in the copy's history and the head does not move. The
+        person's next save writes a fresh pending version. Requires `request_manage`.
       responses:
         "200":
-          description: Whether an open proposal was dismissed.
+          description: The version was rejected.
           content:
             application/json:
               schema:
-                $ref: "#/components/schemas/DismissResponse"
+                $ref: "#/components/schemas/RejectResponse"
         "404":
           $ref: "#/components/responses/NotFound"
+        "409":
+          $ref: "#/components/responses/Conflict"
         default:
           $ref: "#/components/responses/Error"
 
@@ -670,7 +728,22 @@ components:
         client's owning organization. First-party tokens and identity-only partner tokens are
         refused on this plane.
 
+        Or an app token for a staff member the app connected (the hosted ceremony with an
+        `app_token` connect hint): a JWT the app signed itself — `iss` its registered issuer, `aud`
+        the platform audience, `azp` its client id, `sub` its own id for the staff member, `iat`
+        and `exp` at most ten minutes apart. The member's authorization of the app must carry the
+        `organization` scope, and membership is re-checked live on every call as for any token.
+
   parameters:
+    manifestId:
+      name: manifestId
+      in: path
+      required: true
+      description: The manifest id.
+      schema:
+        type: string
+        format: uuid
+        x-go-type: string
     requestId:
       name: requestId
       in: path
@@ -689,15 +762,22 @@ components:
         type: string
         format: uuid
         x-go-type: string
-    proposalId:
-      name: proposalId
+    resourceId:
+      name: resourceId
       in: path
       required: true
-      description: The proposal's id, as listed on `/proposals` and on the request detail.
+      description: A copy's chain — the org document every version of it belongs to — as listed on `/pending`.
       schema:
         type: string
         format: uuid
         x-go-type: string
+    version:
+      name: version
+      in: path
+      required: true
+      description: The version's number in the copy's chain, as listed on `/pending`.
+      schema:
+        type: integer
     adoptionId:
       name: adoptionId
       in: path
@@ -766,6 +846,14 @@ components:
         application/json:
           schema:
             $ref: "#/components/schemas/Error"
+    QuotaExceeded:
+      description: |
+        `quota_exceeded` — the upload would take the organization past its plan's storage quota.
+        Refused before any object is written.
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/Error"
     Forbidden:
       description: The act is refused (`role_insufficient`, `adoption_refused`).
       content:
@@ -829,12 +917,176 @@ components:
         initiatingClientId:
           type: string
           description: The app that mediated a recipient-initiated request.
+        externalRef:
+          type: string
+          description: Your own id for the request's subject, on a request you imported (`/imports`).
         invitationExpiresAt:
           type: string
           format: date-time
         createdAt:
           type: string
           format: date-time
+
+    Manifest:
+      type: object
+      required: [manifestId, version, name, subjects, items]
+      properties:
+        manifestId:
+          type: string
+          format: uuid
+        version:
+          type: integer
+        name:
+          type: string
+        subjects:
+          type: array
+          items:
+            $ref: "#/components/schemas/ManifestSubject"
+        items:
+          type: array
+          items:
+            $ref: "#/components/schemas/ManifestSlot"
+
+    ManifestSubject:
+      type: object
+      required: [id, type, repeat]
+      properties:
+        id:
+          type: string
+        type:
+          type: string
+          description: "`person` or `company`."
+        relation:
+          type: string
+        label:
+          type: string
+        repeat:
+          type: boolean
+
+    ManifestSlot:
+      type: object
+      required: [slotId, multiple, kind, verbs]
+      properties:
+        slotId:
+          type: string
+          format: uuid
+        label:
+          type: string
+        group:
+          type: string
+        subject:
+          type: string
+          description: The manifest subject this slot asks about; absent for the recipient's own items.
+        multiple:
+          type: boolean
+        kind:
+          type: string
+        target:
+          type: string
+        verbs:
+          type: array
+          items:
+            type: string
+        adoption:
+          type: string
+
+    ImportRequest:
+      type: object
+      required: [clientId, manifestId, externalRef, kind, people]
+      properties:
+        clientId:
+          type: string
+          description: The organization's app whose users the people are; it must sign its own tokens.
+        manifestId:
+          type: string
+          format: uuid
+          description: The manifest the request is made on; its newest published version is pinned.
+        externalRef:
+          type: string
+          description: Your own id for the investor, unique in your organization — how a second import finds the request.
+        kind:
+          type: string
+          enum: [individual, company]
+        people:
+          type: array
+          description: Exactly one `owner` (a company's primary contact), and any `contact`s.
+          items:
+            $ref: "#/components/schemas/ImportPerson"
+        values:
+          type: array
+          items:
+            $ref: "#/components/schemas/ImportValue"
+
+    ImportPerson:
+      type: object
+      required: [sub, email, role]
+      properties:
+        sub:
+          type: string
+          description: Your app's own, stable id for the person — the `sub` of its tokens for them.
+        email:
+          type: string
+          format: email
+        role:
+          type: string
+          enum: [owner, contact]
+
+    ImportValue:
+      type: object
+      required: [slotId, data]
+      properties:
+        slotId:
+          type: string
+          format: uuid
+        person:
+          type: string
+          description: For a slot about the recipient, the `sub` whose own record this is; omitted for the owner's.
+        ref:
+          type: string
+          description: For a slot about a repeatable manifest subject, your own id for which party.
+        name:
+          type: string
+          description: The record's name; the slot's label when omitted.
+        data:
+          type: object
+          additionalProperties: true
+          description: The record's values, validated against the slot's schema. Empty values are skipped.
+
+    ImportResult:
+      type: object
+      required: [requestId, requestCreated, people, recordsCreated, recordsSkipped]
+      properties:
+        requestId:
+          type: string
+          format: uuid
+        requestCreated:
+          type: boolean
+          description: False when the request already existed (a re-run).
+        people:
+          type: array
+          items:
+            $ref: "#/components/schemas/ImportedPerson"
+        recordsCreated:
+          type: integer
+        recordsSkipped:
+          type: integer
+          description: Values whose slot and party already held a copy.
+
+    ImportedPerson:
+      type: object
+      required: [sub, role, accountCreated, added]
+      properties:
+        sub:
+          type: string
+        role:
+          type: string
+          enum: [owner, contact]
+        accountCreated:
+          type: boolean
+          description: A held account was created for the person now.
+        added:
+          type: boolean
+          description: The person was put on the request now.
 
     RequestsResponse:
       type: object
@@ -1025,13 +1277,20 @@ components:
             before the snapshot shipped, which is deliberately not backfilled — the inputs are
             gone).
 
-    Proposal:
+    PendingVersionRef:
       type: object
-      required: [proposalId, itemKind, resourceId, newVersion, proposedAt]
+      required: [resourceId, version, sourceVersion, proposedAt, origin]
+      description: |
+        One version waiting for a decision, without its values — what the request detail lists.
+        Read the values on `/pending`.
       properties:
-        proposalId:
+        resourceId:
           type: string
           format: uuid
+          description: The copy's chain.
+        version:
+          type: integer
+          description: The version's number in the chain.
         slotId:
           type: string
           format: uuid
@@ -1039,26 +1298,46 @@ components:
           type: string
         itemTarget:
           type: string
-        resourceId:
-          type: string
-          format: uuid
-        newVersion:
+        sourceVersion:
           type: integer
+          description: The person's version it is.
         proposedAt:
           type: string
           format: date-time
+        origin:
+          type: string
+          description: "`copy` (the person's own update) or `user_correction` (a correction someone on the connection proposed)."
         participant:
           allOf:
             - $ref: "#/components/schemas/ParticipantRef"
           nullable: true
-          description: |
-            Whose newer version this notice is about. Always present, `null` for the recipient's
-            own item. Derived from the notice's live grant rather than snapshotted: a notice
-            cascades with its grant, so there is nothing for it to outlive.
+          description: Whose record this is. Always present, `null` for the recipient's own item.
+
+    PendingVersion:
+      allOf:
+        - $ref: "#/components/schemas/PendingVersionRef"
+        - type: object
+          required: [name, proposed]
+          properties:
+            name:
+              type: string
+            schemaRef:
+              type: string
+            proposed:
+              type: object
+              additionalProperties: true
+              description: The pending version's values.
+            current:
+              type: object
+              additionalProperties: true
+              description: The copy's head now — absent when the copy has no accepted version yet.
+            currentOrgVersion:
+              type: integer
+              description: The head's version in the chain, when there is one.
 
     RequestDetailResponse:
       type: object
-      required: [request, manifestName, items, adoptions, proposals]
+      required: [request, manifestName, items, adoptions, pending]
       properties:
         request:
           $ref: "#/components/schemas/Request"
@@ -1072,10 +1351,11 @@ components:
           type: array
           items:
             $ref: "#/components/schemas/Adoption"
-        proposals:
+        pending:
           type: array
+          description: The versions waiting for a decision, without their values (see `/pending`).
           items:
-            $ref: "#/components/schemas/Proposal"
+            $ref: "#/components/schemas/PendingVersionRef"
 
     Copy:
       type: object
@@ -1203,9 +1483,10 @@ components:
       type: object
       description: |
         One version of one file the organization holds for a request (request-files): a copy it
-        kept of the person's file, or a file it attached itself. Both are rows of the
-        organization's own vault carrying the request they belong to, and the person sees neither
-        — no organization → person direction exists.
+        kept of the person's file, or a file it attached itself. Both are rows of the request's own
+        vault, which the organization owns, carrying the request they belong to. The person sees
+        what names a file kept of theirs among what the organization holds about them; a file the
+        organization attached is not shown to them.
 
         `/files` returns the head of each file, one row per file; `/files/{fileId}/history`
         returns every version of one file. Same shape for both: a history row IS a row of the same
@@ -1378,34 +1659,18 @@ components:
         stillPending:
           type: integer
 
-    ProposalsResponse:
+    PendingVersionsResponse:
       type: object
-      required: [proposals]
+      required: [pending]
       properties:
-        proposals:
+        pending:
           type: array
           items:
-            $ref: "#/components/schemas/Proposal"
+            $ref: "#/components/schemas/PendingVersion"
 
-    ProposalCandidateResponse:
+    RejectResponse:
       type: object
-      required: [proposal, version, name, data]
+      required: [rejected]
       properties:
-        proposal:
-          $ref: "#/components/schemas/Proposal"
-        version:
-          type: integer
-        name:
-          type: string
-        schemaRef:
-          type: string
-        data:
-          type: object
-          additionalProperties: true
-
-    DismissResponse:
-      type: object
-      required: [dismissed]
-      properties:
-        dismissed:
+        rejected:
           type: boolean
