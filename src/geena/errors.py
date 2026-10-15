@@ -42,6 +42,16 @@ class GeenaAPIError(GeenaError):
         self.message = message
 
     @property
+    def is_unauthorized(self) -> bool:
+        """Geena refused the token itself; the reason is never returned.
+
+        An app token: it expired, no longer verifies against the registered key, or its ``sub``
+        is not connected for the app — sign a new one, and reconnect the person if it persists.
+        An OAuth access token: refresh it.
+        """
+        return self.status == 401
+
+    @property
     def is_not_found(self) -> bool:
         """The oracle answer: ungranted, foreign, malformed or nonexistent, deliberately one."""
         return self.status == 404
@@ -78,6 +88,10 @@ SEALED = "sealed"
 ORG_SEALED = "org_sealed"
 SERVER_ERROR = "server_error"
 CONNECTION_INACTIVE = "connection_inactive"
+INVALID_BODY = "invalid_body"
+UNKNOWN_CLIENT = "unknown_client"
+ORGANIZATION_SUSPENDED = "organization_suspended"
+PARTNER_TOKEN_REQUIRED = "partner_token_required"
 
 # Partner plane.
 VERB_NOT_GRANTED = "verb_not_granted"
@@ -93,12 +107,21 @@ DELETE_REFUSED = "delete_refused"
 UNSUPPORTED_ITEM = "unsupported_item"
 INVALID_DOCUMENT = "invalid_document"
 TOO_LARGE = "too_large"
+#: A held account (imported, not yet claimed) on a route other than reading and correcting.
+ACCOUNT_HELD = "account_held"
+#: A contact on a request (not its owner) on a route other than reading and correcting.
+CONTACT_CORRECTIONS_ONLY = "contact_corrections_only"
 
 # Organization plane.
 NOT_A_MEMBER = "not_a_member"
 ROLE_INSUFFICIENT = "role_insufficient"
 ADOPTION_REFUSED = "adoption_refused"
 VERSION_CONFLICT = "version_conflict"
+QUOTA_EXCEEDED = "quota_exceeded"
+#: An import's input is refused before anything is written; the message says why.
+IMPORT_REFUSED = "import_refused"
+#: An imported person's ``sub`` is already bound to another Geena account.
+IDENTITY_CONFLICT = "identity_conflict"
 
 # Record-level reasons (a served or listed record with ``status: "unavailable"``).
 RECORD_UNREADABLE = "record_unreadable"

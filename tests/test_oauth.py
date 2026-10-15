@@ -8,8 +8,10 @@ from urllib.parse import parse_qs, urlparse
 import pytest
 
 from geena import (
+    CONNECT_SCOPE,
     ORGANIZATION_SCOPE,
     GeenaClient,
+    GeenaError,
     GeenaOAuthError,
     ReconnectRequired,
     TokenSet,
@@ -158,3 +160,40 @@ async def test_ensure_fresh_without_a_refresh_token_means_reconnect(client: Geen
 
 async def test_grant_url(client: GeenaClient) -> None:
     assert client.grant_url("req-1") == "https://dashboard.test.geena.eu/personal/connections/req-1"
+
+
+def test_connect_url_carries_the_hint_on_an_organization_sign_in(client: GeenaClient) -> None:
+    url = client.oauth.connect_url(
+        redirect_uri="https://office.example.com/geena/connected",
+        state="st",
+        code_challenge="ch",
+        connect_hint="eyJ.connect.hint",
+    )
+    q = parse_qs(urlparse(url).query)
+    assert q["scope"] == [CONNECT_SCOPE] and "organization" in CONNECT_SCOPE.split()
+    assert q["app_token"] == ["eyJ.connect.hint"]
+    assert q["response_type"] == ["code"] and q["code_challenge_method"] == ["S256"]
+    assert "manifest_id" not in q
+
+
+def test_a_connect_hint_rides_only_on_organization_access(client: GeenaClient) -> None:
+    with pytest.raises(ValueError, match="organization-access"):
+        client.oauth.authorize_url(
+            redirect_uri="https://office.example.com/cb",
+            state="st",
+            code_challenge="ch",
+            manifest_id="m-1",
+            app_token="eyJ.connect.hint",
+        )
+
+
+async def test_an_app_that_signs_its_own_tokens_needs_no_secret() -> None:
+    async with GeenaClient("https://api.test.geena.eu", client_id="dff-staff") as c:
+        assert c.oauth.connect_url(
+            redirect_uri="https://office.example.com/cb",
+            state="st",
+            code_challenge="ch",
+            connect_hint="h",
+        )
+        with pytest.raises(GeenaError, match="no client secret"):
+            await c.oauth.exchange_code(code="c", code_verifier="v", redirect_uri="r")

@@ -1,10 +1,12 @@
 """``/org/v1``: what your organization holds, with a member-bound token.
 
-The token is a partner access token whose consent carries the ``organization`` scope (an
-organization-access ceremony, see :mod:`geena.oauth`). Every call re-checks that the member
-is still active and that their role covers the act: ``request_read`` to read requests,
-``request_manage`` to keep, correct and decide, plus the file permissions to attach files.
-An organization key the member's context cannot open answers ``423 org_sealed``.
+The token is either an app token your app signed for a member it connected
+(:mod:`geena.app_tokens`), or a partner access token whose consent carries the ``organization``
+scope (an organization-access ceremony, see :mod:`geena.oauth`). Every call re-checks that the
+member is still active and that their role covers the act: ``request_read`` to read requests,
+``request_manage`` to import, keep, correct and decide, plus the file permissions to attach
+files. An organization key the member's context cannot open answers ``423 org_sealed``: the
+member has not activated their membership by signing in to Geena yet.
 """
 
 from __future__ import annotations
@@ -16,10 +18,12 @@ from geena.models.org import (
     CopiesResponse,
     CopyCorrectionResult,
     CorrectCopyRequest,
-    DismissResponse,
     DrainResponse,
-    ProposalCandidateResponse,
-    ProposalsResponse,
+    ImportRequest,
+    ImportResult,
+    Manifest,
+    PendingVersionsResponse,
+    RejectResponse,
     RemovedFileResponse,
     RequestDetailResponse,
     RequestFile,
@@ -49,9 +53,38 @@ class OrgClient:
         )
 
     async def request(self, token: str, request_id: str) -> RequestDetailResponse:
-        """One request in full: items with their records, the kept copies, the open proposals."""
+        """One request in full: items with their records, the kept copies, the pending
+        versions."""
         return RequestDetailResponse.model_validate(
             await self._t.json("GET", f"{PREFIX}/requests/{request_id}", token=token)
+        )
+
+    async def manifest(self, token: str, manifest_id: str) -> Manifest:
+        """The manifest's newest published version: its subjects and slots, with the slot ids
+        an import maps your fields onto."""
+        return Manifest.model_validate(
+            await self._t.json("GET", f"{PREFIX}/manifests/{manifest_id}", token=token)
+        )
+
+    # -- importing investors -----------------------------------------------------------------
+
+    async def import_investor(self, token: str, investor: ImportRequest) -> ImportResult:
+        """Bring one investor your organization already serves into Geena, in one transaction.
+
+        People are found by your app's ``sub`` for them, or created as held accounts that your
+        app's tokens reach until they claim. The request is found by ``external_ref`` or
+        created, active, with every held person on it; every non-empty value becomes the first
+        version of a copy your organization keeps. Nothing reaches anyone's own vault and no mail
+        is sent. A re-run adds what is new and never overwrites (correct a copy instead).
+        Requires ``request_manage``; ``400 import_refused`` names what to fix.
+        """
+        return ImportResult.model_validate(
+            await self._t.json(
+                "POST",
+                f"{PREFIX}/imports",
+                token=token,
+                json=investor.model_dump(by_alias=True, exclude_none=True),
+            )
         )
 
     # -- kept copies -------------------------------------------------------------------------
@@ -198,43 +231,36 @@ class OrgClient:
             params={"version": str(version)} if version is not None else None,
         )
 
-    # -- update proposals --------------------------------------------------------------------
+    # -- pending versions --------------------------------------------------------------------
 
-    async def proposals(self, token: str, request_id: str) -> ProposalsResponse:
-        """The open notices that a source you hold a copy of has a newer version."""
-        return ProposalsResponse.model_validate(
-            await self._t.json("GET", f"{PREFIX}/requests/{request_id}/proposals", token=token)
+    async def pending(self, token: str, request_id: str) -> PendingVersionsResponse:
+        """The versions of your copies waiting for a member: a person's update on a manual
+        slot, or a correction someone on the connection proposed — with their values beside
+        the copy's head."""
+        return PendingVersionsResponse.model_validate(
+            await self._t.json("GET", f"{PREFIX}/requests/{request_id}/pending", token=token)
         )
 
-    async def proposal_candidate(
-        self, token: str, request_id: str, proposal_id: str
-    ) -> ProposalCandidateResponse:
-        """The proposed version's values. Looking is taking: this read is receipted to the
-        person."""
-        return ProposalCandidateResponse.model_validate(
+    async def accept_pending(
+        self, token: str, request_id: str, resource_id: str, version: int
+    ) -> Adoption:
+        """Accept a pending version: it becomes the head everyone reads, the keep recorded."""
+        return Adoption.model_validate(
             await self._t.json(
-                "GET",
-                f"{PREFIX}/requests/{request_id}/proposals/{proposal_id}/candidate",
+                "POST",
+                f"{PREFIX}/requests/{request_id}/pending/{resource_id}/{version}/accept",
                 token=token,
             )
         )
 
-    async def adopt_proposal(self, token: str, request_id: str, proposal_id: str) -> Adoption:
-        """Keep the proposed version as the organization's copy and close the notice."""
-        return Adoption.model_validate(
-            await self._t.json(
-                "POST", f"{PREFIX}/requests/{request_id}/proposals/{proposal_id}/adopt", token=token
-            )
-        )
-
-    async def dismiss_proposal(
-        self, token: str, request_id: str, proposal_id: str
-    ) -> DismissResponse:
-        """Close the notice without keeping; a later edit opens a fresh one."""
-        return DismissResponse.model_validate(
+    async def reject_pending(
+        self, token: str, request_id: str, resource_id: str, version: int
+    ) -> RejectResponse:
+        """Reject a pending version: the head stays, the rejected version stays on record."""
+        return RejectResponse.model_validate(
             await self._t.json(
                 "POST",
-                f"{PREFIX}/requests/{request_id}/proposals/{proposal_id}/dismiss",
+                f"{PREFIX}/requests/{request_id}/pending/{resource_id}/{version}/reject",
                 token=token,
             )
         )

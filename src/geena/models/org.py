@@ -26,6 +26,8 @@ class Request(Payload):
     #: ``org`` (sent from the dashboard) or ``recipient`` (opened from an app's ceremony).
     initiated_by: str = Field(alias="initiatedBy")
     initiating_client_id: str | None = Field(default=None, alias="initiatingClientId")
+    #: Your own id for the investor, on a request you imported (``OrgClient.import_investor``).
+    external_ref: str | None = Field(default=None, alias="externalRef")
     invitation_expires_at: str | None = Field(default=None, alias="invitationExpiresAt")
     created_at: str = Field(alias="createdAt")
 
@@ -105,17 +107,49 @@ class Adoption(Payload):
         return self.state == "materialized"
 
 
-class Proposal(Payload):
-    """A notice: the source of something you hold has a newer version."""
+class PendingVersionRef(Payload):
+    """A version of a kept copy waiting for a member's decision, without its values."""
 
-    proposal_id: str = Field(alias="proposalId")
+    #: The copy's chain.
+    resource_id: str = Field(alias="resourceId")
+    #: The version's number in the chain: what accept and reject address.
+    version: int
     slot_id: str | None = Field(default=None, alias="slotId")
     item_kind: str | None = Field(default=None, alias="itemKind")
     item_target: str | None = Field(default=None, alias="itemTarget")
-    resource_id: str = Field(alias="resourceId")
-    new_version: int = Field(alias="newVersion")
+    #: The person's version it is.
+    source_version: int = Field(alias="sourceVersion")
     proposed_at: str = Field(alias="proposedAt")
+    #: ``copy`` (the person's own update) or ``user_correction`` (a correction someone on the
+    #: connection proposed — a held account's, or a contact's).
+    origin: str
+    #: Whose record this is; ``None`` for the recipient's own item.
     participant: ParticipantRef | None = None
+
+    @property
+    def is_correction(self) -> bool:
+        return self.origin == "user_correction"
+
+
+class PendingVersion(PendingVersionRef):
+    """A pending version with its values, beside the copy's head now."""
+
+    name: str
+    schema_ref: str | None = Field(default=None, alias="schemaRef")
+    #: The pending version's values.
+    proposed: DocumentData = Field(default_factory=dict)
+    #: The copy's head now; ``None`` when the copy has no accepted version yet.
+    current: DocumentData | None = None
+    #: The head's version in the chain, when there is one.
+    current_org_version: int | None = Field(default=None, alias="currentOrgVersion")
+
+
+class PendingVersionsResponse(Payload):
+    pending: list[PendingVersion] = Field(default_factory=list)
+
+
+class RejectResponse(Payload):
+    rejected: bool
 
 
 class RequestDetailResponse(Payload):
@@ -123,7 +157,8 @@ class RequestDetailResponse(Payload):
     manifest_name: str = Field(alias="manifestName")
     items: list[RequestItem] = Field(default_factory=list)
     adoptions: list[Adoption] = Field(default_factory=list)
-    proposals: list[Proposal] = Field(default_factory=list)
+    #: The versions waiting for a decision, without their values (see ``OrgClient.pending``).
+    pending: list[PendingVersionRef] = Field(default_factory=list)
 
 
 class Copy(Payload):
@@ -251,19 +286,114 @@ class DrainResponse(Payload):
     still_pending: int = Field(default=0, alias="stillPending")
 
 
-class ProposalsResponse(Payload):
-    proposals: list[Proposal] = Field(default_factory=list)
+class ManifestSubject(Payload):
+    """A party beyond the recipient that the manifest asks about."""
+
+    id: str
+    #: ``person`` or ``company``.
+    type: str
+    relation: str | None = None
+    label: str | None = None
+    repeat: bool = False
 
 
-class ProposalCandidateResponse(Payload):
-    """The proposed version's values — looking is taking: this read is receipted to the person."""
+class ManifestSlot(Payload):
+    """One item the manifest asks for. ``slot_id`` is minted at publish: read it, never
+    hard-code it."""
 
-    proposal: Proposal
+    slot_id: str = Field(alias="slotId")
+    label: str | None = None
+    group: str | None = None
+    #: The manifest subject this slot asks about; ``None`` for the recipient's own items.
+    subject: str | None = None
+    multiple: bool = False
+    #: ``schema``, ``personal_files``, ``entity_files``, ``custom_schema``.
+    kind: str
+    target: str | None = None
+    verbs: list[str] = Field(default_factory=list)
+    #: The ``keep`` slot's adoption policy: ``manual`` or ``auto``.
+    adoption: str | None = None
+
+
+class Manifest(Payload):
+    """The newest published version of a manifest: what an import maps your fields onto."""
+
+    manifest_id: str = Field(alias="manifestId")
     version: int
     name: str
-    schema_ref: str | None = Field(default=None, alias="schemaRef")
-    data: DocumentData = Field(default_factory=dict)
+    subjects: list[ManifestSubject] = Field(default_factory=list)
+    items: list[ManifestSlot] = Field(default_factory=list)
+
+    def slot(self, target: str, *, subject: str | None = None) -> ManifestSlot:
+        """The one slot asking for ``target`` about ``subject`` (``None``: the recipient).
+
+        Raises ``LookupError`` when the manifest asks for it in no slot, or in several.
+        """
+        found = [item for item in self.items if item.target == target and item.subject == subject]
+        if len(found) != 1:
+            about = f"subject {subject!r}" if subject else "the recipient"
+            raise LookupError(f"{len(found)} slots ask for {target} about {about}")
+        return found[0]
 
 
-class DismissResponse(Payload):
-    dismissed: bool
+class ImportPerson(Payload):
+    """One person on an imported investor: your app's ``sub`` for them, their email, their
+    role. One person keeps one ``sub`` on every investor they are on."""
+
+    sub: str
+    email: str
+    #: ``owner`` (exactly one: a company's primary contact) or ``contact``.
+    role: str
+
+
+class ImportValue(Payload):
+    """One value your organization already holds, for one slot.
+
+    For a slot about the recipient, ``person`` names whose own record it is (a ``sub``; omitted:
+    the owner's). For a slot about a repeatable manifest subject, ``ref`` is your own id for
+    which party. ``data`` is validated against the slot's schema; empty values are skipped.
+    """
+
+    slot_id: str = Field(alias="slotId")
+    person: str | None = None
+    ref: str | None = None
+    #: The record's name; the slot's label when omitted.
+    name: str | None = None
+    data: DocumentData
+
+
+class ImportRequest(Payload):
+    """One investor — a person, or a company with its contacts — and what you hold about them.
+
+    ``client_id`` is your app whose users the people are (it must sign its own tokens);
+    ``external_ref`` is your own id for the investor, unique in your organization: a second
+    import with it adds what is new and never overwrites.
+    """
+
+    client_id: str = Field(alias="clientId")
+    manifest_id: str = Field(alias="manifestId")
+    external_ref: str = Field(alias="externalRef")
+    #: ``individual`` or ``company``.
+    kind: str
+    #: Exactly one ``owner`` and any ``contact``s.
+    people: list[ImportPerson] = Field(default_factory=list)
+    values: list[ImportValue] = Field(default_factory=list)
+
+
+class ImportedPerson(Payload):
+    sub: str
+    role: str
+    #: A held account was created for the person now.
+    account_created: bool = Field(alias="accountCreated")
+    #: The person was put on the request now.
+    added: bool
+
+
+class ImportResult(Payload):
+    request_id: str = Field(alias="requestId")
+    #: ``False`` when the request already existed: a re-run.
+    request_created: bool = Field(alias="requestCreated")
+    people: list[ImportedPerson] = Field(default_factory=list)
+    records_created: int = Field(default=0, alias="recordsCreated")
+    #: Values whose slot and party already held a copy: an import never overwrites.
+    records_skipped: int = Field(default=0, alias="recordsSkipped")

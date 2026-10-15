@@ -18,6 +18,9 @@ class ConnectionItem(Payload):
     manifest_name: str | None = Field(default=None, alias="manifestName")
     manifest_version: int = Field(alias="manifestVersion")
     state: str
+    #: Your organization's own id for what the connection is about, on a request it imported —
+    #: tells apart the investors one person is on.
+    external_ref: str | None = Field(default=None, alias="externalRef")
 
 
 class ConnectionsResponse(Payload):
@@ -166,6 +169,14 @@ class WriteResponse(Payload):
     target: str | None = None
     resource_id: str = Field(alias="resourceId")
     version: int
+    #: ``pending`` on a held account's correction (answered ``202``); absent on an ordinary
+    #: write.
+    acceptance: str | None = None
+
+    @property
+    def pending(self) -> bool:
+        """The write is a correction waiting for a member of the organization to accept it."""
+        return self.acceptance == "pending"
 
 
 class CreateResponse(Payload):

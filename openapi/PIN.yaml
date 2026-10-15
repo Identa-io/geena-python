@@ -1,4 +1,4 @@
-identa_tag: v0.39.0
-identa_commit: 310e5df
+identa_tag: v0.40.0
+identa_commit: 6bce8ae
 partner: pkg/partnerapi/openapi.yaml
 org: pkg/orgapi/openapi.yaml
