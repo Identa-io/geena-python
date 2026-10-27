@@ -146,7 +146,7 @@ async def test_copies_expose_the_head_and_pin_a_correction(
                     "adoption": ADOPTION,
                     "resourceId": "org-1",
                     "name": "Payout account",
-                    "schemaRef": "https://schema.identa.io/core/PersonBankAccount.json",
+                    "schemaRef": "https://schema.geena.eu/core/PersonBankAccount.json",
                     "data": {"bankName": "Nya Banken"},
                     "orgVersion": 2,
                     "origin": "copy",
