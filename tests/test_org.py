@@ -353,7 +353,7 @@ async def test_the_manifest_names_the_slot_an_import_maps_onto(
             "manifestId": "m-1",
             "version": 2,
             "name": "DFF investor onboarding",
-            "subjects": [{"id": "company", "type": "company", "repeat": False}],
+            "subjects": [{"id": "company", "type": "legal_entity", "repeat": False}],
             "items": [
                 {
                     "slotId": "s-name",
@@ -374,6 +374,7 @@ async def test_the_manifest_names_the_slot_an_import_maps_onto(
         },
     )
     manifest = await client.org.manifest("staff-tok", "m-1")
+    assert manifest.subjects[0].type == "legal_entity"
     assert manifest.slot("PersonFullName").slot_id == "s-name"
     assert manifest.slot("LegalEntity", subject="company").slot_id == "s-entity"
     with pytest.raises(LookupError):

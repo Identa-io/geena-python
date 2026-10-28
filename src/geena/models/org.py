@@ -290,7 +290,8 @@ class ManifestSubject(Payload):
     """A party beyond the recipient that the manifest asks about."""
 
     id: str
-    #: ``person`` or ``company``.
+    #: ``person`` or ``legal_entity``, the manifest's own vocabulary, as on ``ParticipantRef``
+    #: (the partner plane says ``company``).
     type: str
     relation: str | None = None
     label: str | None = None
